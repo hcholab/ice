@@ -26,6 +26,9 @@ const (
 	// defaultFailedTimeout is the default time till an Agent transitions to failed after disconnected
 	defaultFailedTimeout = 25 * time.Second
 
+	// defaultGatherTimeout is the default time till failing a STUN binding request
+	defaultGatherTimeout = 5 * time.Second
+
 	// defaultHostAcceptanceMinWait is the wait time before nominating a host candidate
 	defaultHostAcceptanceMinWait = 0
 
@@ -85,6 +88,11 @@ type AgentConfig struct {
 	// FailedTimeout defaults to 25 seconds when this property is nil.
 	// If the duration is 0, we will never go to failed.
 	FailedTimeout *time.Duration
+
+	// GatherTimeout determines how long to wait before timing out
+	// a STUN binding request to discover mapped address.
+	// When this is nil, it defaults to 5 seconds.
+	GatherTimeout *time.Duration
 
 	// KeepaliveInterval determines how often should we send ICE
 	// keepalives (should be less then connectiontimeout above)
@@ -238,6 +246,12 @@ func (config *AgentConfig) initWithDefaults(a *Agent) {
 		a.failedTimeout = defaultFailedTimeout
 	} else {
 		a.failedTimeout = *config.FailedTimeout
+	}
+
+	if config.GatherTimeout == nil {
+		a.gatherTimeout = defaultGatherTimeout
+	} else {
+		a.gatherTimeout = *config.GatherTimeout
 	}
 
 	if config.KeepaliveInterval == nil {
