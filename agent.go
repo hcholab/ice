@@ -89,6 +89,9 @@ type Agent struct {
 	// goes to failed
 	failedTimeout time.Duration
 
+	// How long to wait before timing out a STUN binding request to discover mapped address
+	gatherTimeout time.Duration
+
 	// How often should we send keepalive packets?
 	// 0 means never
 	keepaliveInterval time.Duration

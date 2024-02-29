@@ -11,7 +11,6 @@ import (
 	"net"
 	"reflect"
 	"sync"
-	"time"
 
 	"github.com/pion/dtls/v2"
 	"github.com/pion/ice/v3/internal/fakenet"
@@ -19,10 +18,6 @@ import (
 	"github.com/pion/logging"
 	"github.com/pion/stun/v2"
 	"github.com/pion/turn/v3"
-)
-
-const (
-	stunGatherTimeout = time.Second * 5
 )
 
 // Close a net.Conn and log if we have a failure
@@ -409,7 +404,7 @@ func (a *Agent) gatherCandidatesSrflxUDPMux(ctx context.Context, urls []*stun.UR
 						return
 					}
 
-					xorAddr, err := a.udpMuxSrflx.GetXORMappedAddr(serverAddr, stunGatherTimeout)
+					xorAddr, err := a.udpMuxSrflx.GetXORMappedAddr(serverAddr, a.gatherTimeout)
 					if err != nil {
 						a.log.Warnf("Failed get server reflexive address %s %s: %v", network, url, err)
 						return
@@ -489,7 +484,7 @@ func (a *Agent) gatherCandidatesSrflx(ctx context.Context, urls []*stun.URI, net
 					}
 				}()
 
-				xorAddr, err := stunx.GetXORMappedAddr(conn, serverAddr, stunGatherTimeout)
+				xorAddr, err := stunx.GetXORMappedAddr(conn, serverAddr, a.gatherTimeout)
 				if err != nil {
 					closeConnAndLog(conn, a.log, "failed to get server reflexive address %s %s: %v", network, url, err)
 					return
