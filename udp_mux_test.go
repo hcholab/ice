@@ -21,11 +21,9 @@ import (
 )
 
 func TestUDPMux(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
 	conn4, err := net.ListenUDP(udp, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	require.NoError(t, err)
@@ -52,13 +50,31 @@ func TestUDPMux(t *testing.T) {
 		network string
 	}
 
-	for _, subTest := range []testCase{
+	testCases := []testCase{
 		{name: "IPv4loopback", conn: conn4, network: udp4},
 		{name: "IPv6loopback", conn: conn6, network: udp6},
 		{name: "Unspecified", conn: connUnspecified, network: udp},
 		{name: "IPv4Unspecified", conn: conn4Unspecified, network: udp4},
 		{name: "IPv6Unspecified", conn: conn6Unspecified, network: udp6},
-	} {
+	}
+
+	if ipv6Available(t) {
+		addr6 := getLocalIPAddress(t, NetworkTypeUDP6)
+
+		conn6Unspecified, listenEerr := net.ListenUDP(udp, &net.UDPAddr{
+			IP:   addr6.AsSlice(),
+			Zone: addr6.Zone(),
+		})
+		if listenEerr != nil {
+			t.Log("IPv6 is not supported on this machine")
+		}
+
+		testCases = append(testCases,
+			testCase{name: "IPv6Specified", conn: conn6Unspecified, network: udp6},
+		)
+	}
+
+	for _, subTest := range testCases {
 		network, conn := subTest.network, subTest.conn
 		if udpConn, ok := conn.(*net.UDPConn); !ok || udpConn == nil {
 			continue

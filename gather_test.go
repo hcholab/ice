@@ -26,35 +26,34 @@ import (
 	"github.com/pion/stun/v2"
 	"github.com/pion/transport/v3/test"
 	"github.com/pion/turn/v3"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/proxy"
 )
 
 func TestListenUDP(t *testing.T) {
 	a, err := NewAgent(&AgentConfig{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	localIPs, err := localInterfaces(a.net, a.interfaceFilter, a.ipFilter, []NetworkType{NetworkTypeUDP4}, false)
-	assert.NotEqual(t, len(localIPs), 0, "localInterfaces found no interfaces, unable to test")
-	assert.NoError(t, err)
+	_, localAddrs, err := localInterfaces(a.net, a.interfaceFilter, a.ipFilter, []NetworkType{NetworkTypeUDP4}, false)
+	require.NotEqual(t, len(localAddrs), 0, "localInterfaces found no interfaces, unable to test")
+	require.NoError(t, err)
 
-	ip := localIPs[0]
+	ip := localAddrs[0].AsSlice()
 
 	conn, err := listenUDPInPortRange(a.net, a.log, 0, 0, udp, &net.UDPAddr{IP: ip, Port: 0})
-	assert.NoError(t, err, "listenUDP error with no port restriction")
-	assert.NotNil(t, conn, "listenUDP error with no port restriction return a nil conn")
+	require.NoError(t, err, "listenUDP error with no port restriction")
+	require.NotNil(t, conn, "listenUDP error with no port restriction return a nil conn")
 
 	_, err = listenUDPInPortRange(a.net, a.log, 4999, 5000, udp, &net.UDPAddr{IP: ip, Port: 0})
-	assert.Equal(t, err, ErrPort, "listenUDP with invalid port range did not return ErrPort")
+	require.Equal(t, err, ErrPort, "listenUDP with invalid port range did not return ErrPort")
 
 	conn, err = listenUDPInPortRange(a.net, a.log, 5000, 5000, udp, &net.UDPAddr{IP: ip, Port: 0})
-	assert.NoError(t, err, "listenUDP error with no port restriction")
-	assert.NotNil(t, conn, "listenUDP error with no port restriction return a nil conn")
+	require.NoError(t, err, "listenUDP error with no port restriction")
+	require.NotNil(t, conn, "listenUDP error with no port restriction return a nil conn")
 
 	_, port, err := net.SplitHostPort(conn.LocalAddr().String())
-	assert.NoError(t, err)
-	assert.Equal(t, port, "5000", "listenUDP with port restriction of 5000 listened on incorrect port")
+	require.NoError(t, err)
+	require.Equal(t, port, "5000", "listenUDP with port restriction of 5000 listened on incorrect port")
 
 	portMin := 5100
 	portMax := 5109
@@ -63,13 +62,12 @@ func TestListenUDP(t *testing.T) {
 	portRange := make([]int, 0, total)
 	for i := 0; i < total; i++ {
 		conn, err = listenUDPInPortRange(a.net, a.log, portMax, portMin, udp, &net.UDPAddr{IP: ip, Port: 0})
-		assert.NoError(t, err, "listenUDP error with no port restriction")
-		assert.NotNil(t, conn, "listenUDP error with no port restriction return a nil conn")
+		require.NoError(t, err, "listenUDP error with no port restriction")
+		require.NotNil(t, conn, "listenUDP error with no port restriction return a nil conn")
 
 		_, port, err = net.SplitHostPort(conn.LocalAddr().String())
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err)
+
 		p, _ := strconv.Atoi(port)
 		if p < portMin || p > portMax {
 			t.Fatalf("listenUDP with port restriction [%d, %d] listened on incorrect port (%s)", portMin, portMax, port)
@@ -85,26 +83,24 @@ func TestListenUDP(t *testing.T) {
 		t.Fatalf("listenUDP with port restriction [%d, %d], got:%v, want:%v", portMin, portMax, result, portRange)
 	}
 	_, err = listenUDPInPortRange(a.net, a.log, portMax, portMin, udp, &net.UDPAddr{IP: ip, Port: 0})
-	assert.Equal(t, err, ErrPort, "listenUDP with port restriction [%d, %d], did not return ErrPort", portMin, portMax)
+	require.Equal(t, err, ErrPort, "listenUDP with port restriction [%d, %d], did not return ErrPort", portMin, portMax)
 
-	assert.NoError(t, a.Close())
+	require.NoError(t, a.Close())
 }
 
 func TestGatherConcurrency(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
 	a, err := NewAgent(&AgentConfig{
 		NetworkTypes:    []NetworkType{NetworkTypeUDP4, NetworkTypeUDP6},
 		IncludeLoopback: true,
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	candidateGathered, candidateGatheredFunc := context.WithCancel(context.Background())
-	assert.NoError(t, a.OnCandidate(func(c Candidate) {
+	require.NoError(t, a.OnCandidate(func(Candidate) {
 		candidateGatheredFunc()
 	}))
 
@@ -115,27 +111,25 @@ func TestGatherConcurrency(t *testing.T) {
 
 	<-candidateGathered.Done()
 
-	assert.NoError(t, a.Close())
+	require.NoError(t, a.Close())
 }
 
 func TestLoopbackCandidate(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 	type testCase struct {
 		name        string
 		agentConfig *AgentConfig
 		loExpected  bool
 	}
 	mux, err := NewMultiUDPMuxFromPort(12500)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	muxWithLo, errlo := NewMultiUDPMuxFromPort(12501, UDPMuxFromPortWithLoopback())
-	assert.NoError(t, errlo)
+	require.NoError(t, errlo)
 
 	unspecConn, errconn := net.ListenPacket("udp", ":0")
-	assert.NoError(t, errconn)
+	require.NoError(t, errconn)
 	defer func() {
 		_ = unspecConn.Close()
 	}()
@@ -199,11 +193,11 @@ func TestLoopbackCandidate(t *testing.T) {
 		tcase := tc
 		t.Run(tcase.name, func(t *testing.T) {
 			a, err := NewAgent(tc.agentConfig)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			candidateGathered, candidateGatheredFunc := context.WithCancel(context.Background())
 			var loopback int32
-			assert.NoError(t, a.OnCandidate(func(c Candidate) {
+			require.NoError(t, a.OnCandidate(func(c Candidate) {
 				if c != nil {
 					if net.ParseIP(c.Address()).IsLoopback() {
 						atomic.StoreInt32(&loopback, 1)
@@ -214,31 +208,29 @@ func TestLoopbackCandidate(t *testing.T) {
 				}
 				t.Log(c.NetworkType(), c.Priority(), c)
 			}))
-			assert.NoError(t, a.GatherCandidates())
+			require.NoError(t, a.GatherCandidates())
 
 			<-candidateGathered.Done()
 
-			assert.NoError(t, a.Close())
-			assert.Equal(t, tcase.loExpected, atomic.LoadInt32(&loopback) == 1)
+			require.NoError(t, a.Close())
+			require.Equal(t, tcase.loExpected, atomic.LoadInt32(&loopback) == 1)
 		})
 	}
 
-	assert.NoError(t, mux.Close())
-	assert.NoError(t, muxWithLo.Close())
-	assert.NoError(t, muxUnspecDefault.Close())
+	require.NoError(t, mux.Close())
+	require.NoError(t, muxWithLo.Close())
+	require.NoError(t, muxUnspecDefault.Close())
 }
 
 // Assert that STUN gathering is done concurrently
 func TestSTUNConcurrency(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
 	serverPort := randomPort(t)
-	serverListener, err := net.ListenPacket("udp4", "127.0.0.1:"+strconv.Itoa(serverPort))
-	assert.NoError(t, err)
+	serverListener, err := net.ListenPacket("udp4", localhostIPStr+":"+strconv.Itoa(serverPort))
+	require.NoError(t, err)
 
 	server, err := turn.NewServer(turn.ServerConfig{
 		Realm:       "pion.ly",
@@ -246,23 +238,23 @@ func TestSTUNConcurrency(t *testing.T) {
 		PacketConnConfigs: []turn.PacketConnConfig{
 			{
 				PacketConn:            serverListener,
-				RelayAddressGenerator: &turn.RelayAddressGeneratorNone{Address: "127.0.0.1"},
+				RelayAddressGenerator: &turn.RelayAddressGeneratorNone{Address: localhostIPStr},
 			},
 		},
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	urls := []*stun.URI{}
 	for i := 0; i <= 10; i++ {
 		urls = append(urls, &stun.URI{
 			Scheme: stun.SchemeTypeSTUN,
-			Host:   "127.0.0.1",
+			Host:   localhostIPStr,
 			Port:   serverPort + 1,
 		})
 	}
 	urls = append(urls, &stun.URI{
 		Scheme: stun.SchemeTypeSTUN,
-		Host:   "127.0.0.1",
+		Host:   localhostIPStr,
 		Port:   serverPort,
 	})
 
@@ -286,38 +278,36 @@ func TestSTUNConcurrency(t *testing.T) {
 			},
 		),
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	candidateGathered, candidateGatheredFunc := context.WithCancel(context.Background())
-	assert.NoError(t, a.OnCandidate(func(c Candidate) {
+	require.NoError(t, a.OnCandidate(func(c Candidate) {
 		if c == nil {
 			candidateGatheredFunc()
 			return
 		}
 		t.Log(c.NetworkType(), c.Priority(), c)
 	}))
-	assert.NoError(t, a.GatherCandidates())
+	require.NoError(t, a.GatherCandidates())
 
 	<-candidateGathered.Done()
 
-	assert.NoError(t, a.Close())
-	assert.NoError(t, server.Close())
+	require.NoError(t, a.Close())
+	require.NoError(t, server.Close())
 }
 
 // Assert that TURN gathering is done concurrently
 func TestTURNConcurrency(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
 	runTest := func(protocol stun.ProtoType, scheme stun.SchemeType, packetConn net.PacketConn, listener net.Listener, serverPort int) {
 		packetConnConfigs := []turn.PacketConnConfig{}
 		if packetConn != nil {
 			packetConnConfigs = append(packetConnConfigs, turn.PacketConnConfig{
 				PacketConn:            packetConn,
-				RelayAddressGenerator: &turn.RelayAddressGeneratorNone{Address: "127.0.0.1"},
+				RelayAddressGenerator: &turn.RelayAddressGeneratorNone{Address: localhostIPStr},
 			})
 		}
 
@@ -325,7 +315,7 @@ func TestTURNConcurrency(t *testing.T) {
 		if listener != nil {
 			listenerConfigs = append(listenerConfigs, turn.ListenerConfig{
 				Listener:              listener,
-				RelayAddressGenerator: &turn.RelayAddressGeneratorNone{Address: "127.0.0.1"},
+				RelayAddressGenerator: &turn.RelayAddressGeneratorNone{Address: localhostIPStr},
 			})
 		}
 
@@ -335,13 +325,13 @@ func TestTURNConcurrency(t *testing.T) {
 			PacketConnConfigs: packetConnConfigs,
 			ListenerConfigs:   listenerConfigs,
 		})
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		urls := []*stun.URI{}
 		for i := 0; i <= 10; i++ {
 			urls = append(urls, &stun.URI{
 				Scheme:   scheme,
-				Host:     "127.0.0.1",
+				Host:     localhostIPStr,
 				Username: "username",
 				Password: "password",
 				Proto:    protocol,
@@ -350,7 +340,7 @@ func TestTURNConcurrency(t *testing.T) {
 		}
 		urls = append(urls, &stun.URI{
 			Scheme:   scheme,
-			Host:     "127.0.0.1",
+			Host:     localhostIPStr,
 			Username: "username",
 			Password: "password",
 			Proto:    protocol,
@@ -363,60 +353,60 @@ func TestTURNConcurrency(t *testing.T) {
 			NetworkTypes:       supportedNetworkTypes(),
 			Urls:               urls,
 		})
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		candidateGathered, candidateGatheredFunc := context.WithCancel(context.Background())
-		assert.NoError(t, a.OnCandidate(func(c Candidate) {
+		require.NoError(t, a.OnCandidate(func(c Candidate) {
 			if c != nil {
 				candidateGatheredFunc()
 			}
 		}))
-		assert.NoError(t, a.GatherCandidates())
+		require.NoError(t, a.GatherCandidates())
 
 		<-candidateGathered.Done()
 
-		assert.NoError(t, a.Close())
-		assert.NoError(t, server.Close())
+		require.NoError(t, a.Close())
+		require.NoError(t, server.Close())
 	}
 
 	t.Run("UDP Relay", func(t *testing.T) {
 		serverPort := randomPort(t)
-		serverListener, err := net.ListenPacket("udp", "127.0.0.1:"+strconv.Itoa(serverPort))
-		assert.NoError(t, err)
+		serverListener, err := net.ListenPacket("udp", localhostIPStr+":"+strconv.Itoa(serverPort))
+		require.NoError(t, err)
 
 		runTest(stun.ProtoTypeUDP, stun.SchemeTypeTURN, serverListener, nil, serverPort)
 	})
 
 	t.Run("TCP Relay", func(t *testing.T) {
 		serverPort := randomPort(t)
-		serverListener, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(serverPort))
-		assert.NoError(t, err)
+		serverListener, err := net.Listen("tcp", localhostIPStr+":"+strconv.Itoa(serverPort))
+		require.NoError(t, err)
 
 		runTest(stun.ProtoTypeTCP, stun.SchemeTypeTURN, nil, serverListener, serverPort)
 	})
 
 	t.Run("TLS Relay", func(t *testing.T) {
 		certificate, genErr := selfsign.GenerateSelfSigned()
-		assert.NoError(t, genErr)
+		require.NoError(t, genErr)
 
 		serverPort := randomPort(t)
-		serverListener, err := tls.Listen("tcp", "127.0.0.1:"+strconv.Itoa(serverPort), &tls.Config{ //nolint:gosec
+		serverListener, err := tls.Listen("tcp", localhostIPStr+":"+strconv.Itoa(serverPort), &tls.Config{ //nolint:gosec
 			Certificates: []tls.Certificate{certificate},
 		})
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		runTest(stun.ProtoTypeTCP, stun.SchemeTypeTURNS, nil, serverListener, serverPort)
 	})
 
 	t.Run("DTLS Relay", func(t *testing.T) {
 		certificate, genErr := selfsign.GenerateSelfSigned()
-		assert.NoError(t, genErr)
+		require.NoError(t, genErr)
 
 		serverPort := randomPort(t)
-		serverListener, err := dtls.Listen("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: serverPort}, &dtls.Config{
+		serverListener, err := dtls.Listen("udp", &net.UDPAddr{IP: net.ParseIP(localhostIPStr), Port: serverPort}, &dtls.Config{
 			Certificates: []tls.Certificate{certificate},
 		})
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		runTest(stun.ProtoTypeUDP, stun.SchemeTypeTURNS, nil, serverListener, serverPort)
 	})
@@ -424,15 +414,13 @@ func TestTURNConcurrency(t *testing.T) {
 
 // Assert that STUN and TURN gathering are done concurrently
 func TestSTUNTURNConcurrency(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 8)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 8).Stop()
 
 	serverPort := randomPort(t)
-	serverListener, err := net.ListenPacket("udp4", "127.0.0.1:"+strconv.Itoa(serverPort))
-	assert.NoError(t, err)
+	serverListener, err := net.ListenPacket("udp4", localhostIPStr+":"+strconv.Itoa(serverPort))
+	require.NoError(t, err)
 
 	server, err := turn.NewServer(turn.ServerConfig{
 		Realm:       "pion.ly",
@@ -440,24 +428,24 @@ func TestSTUNTURNConcurrency(t *testing.T) {
 		PacketConnConfigs: []turn.PacketConnConfig{
 			{
 				PacketConn:            serverListener,
-				RelayAddressGenerator: &turn.RelayAddressGeneratorNone{Address: "127.0.0.1"},
+				RelayAddressGenerator: &turn.RelayAddressGeneratorNone{Address: localhostIPStr},
 			},
 		},
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	urls := []*stun.URI{}
 	for i := 0; i <= 10; i++ {
 		urls = append(urls, &stun.URI{
 			Scheme: stun.SchemeTypeSTUN,
-			Host:   "127.0.0.1",
+			Host:   localhostIPStr,
 			Port:   serverPort + 1,
 		})
 	}
 	urls = append(urls, &stun.URI{
 		Scheme:   stun.SchemeTypeTURN,
 		Proto:    stun.ProtoTypeUDP,
-		Host:     "127.0.0.1",
+		Host:     localhostIPStr,
 		Port:     serverPort,
 		Username: "username",
 		Password: "password",
@@ -468,25 +456,24 @@ func TestSTUNTURNConcurrency(t *testing.T) {
 		Urls:           urls,
 		CandidateTypes: []CandidateType{CandidateTypeServerReflexive, CandidateTypeRelay},
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	{
 		gatherLim := test.TimeOut(time.Second * 3) // As TURN and STUN should be checked in parallel, this should complete before the default STUN timeout (5s)
 		candidateGathered, candidateGatheredFunc := context.WithCancel(context.Background())
-		assert.NoError(t, a.OnCandidate(func(c Candidate) {
+		require.NoError(t, a.OnCandidate(func(c Candidate) {
 			if c != nil {
 				candidateGatheredFunc()
 			}
 		}))
-		assert.NoError(t, a.GatherCandidates())
+		require.NoError(t, a.GatherCandidates())
 
 		<-candidateGathered.Done()
-
 		gatherLim.Stop()
 	}
 
-	assert.NoError(t, a.Close())
-	assert.NoError(t, server.Close())
+	require.NoError(t, a.Close())
+	require.NoError(t, server.Close())
 }
 
 // Assert that srflx candidates can be gathered from TURN servers
@@ -496,15 +483,13 @@ func TestSTUNTURNConcurrency(t *testing.T) {
 //
 // https://tools.ietf.org/html/rfc5245#section-2.1
 func TestTURNSrflx(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
 	serverPort := randomPort(t)
-	serverListener, err := net.ListenPacket("udp4", "127.0.0.1:"+strconv.Itoa(serverPort))
-	assert.NoError(t, err)
+	serverListener, err := net.ListenPacket("udp4", localhostIPStr+":"+strconv.Itoa(serverPort))
+	require.NoError(t, err)
 
 	server, err := turn.NewServer(turn.ServerConfig{
 		Realm:       "pion.ly",
@@ -512,16 +497,16 @@ func TestTURNSrflx(t *testing.T) {
 		PacketConnConfigs: []turn.PacketConnConfig{
 			{
 				PacketConn:            serverListener,
-				RelayAddressGenerator: &turn.RelayAddressGeneratorNone{Address: "127.0.0.1"},
+				RelayAddressGenerator: &turn.RelayAddressGeneratorNone{Address: localhostIPStr},
 			},
 		},
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	urls := []*stun.URI{{
 		Scheme:   stun.SchemeTypeTURN,
 		Proto:    stun.ProtoTypeUDP,
-		Host:     "127.0.0.1",
+		Host:     localhostIPStr,
 		Port:     serverPort,
 		Username: "username",
 		Password: "password",
@@ -532,33 +517,33 @@ func TestTURNSrflx(t *testing.T) {
 		Urls:           urls,
 		CandidateTypes: []CandidateType{CandidateTypeServerReflexive, CandidateTypeRelay},
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	candidateGathered, candidateGatheredFunc := context.WithCancel(context.Background())
-	assert.NoError(t, a.OnCandidate(func(c Candidate) {
+	require.NoError(t, a.OnCandidate(func(c Candidate) {
 		if c != nil && c.Type() == CandidateTypeServerReflexive {
 			candidateGatheredFunc()
 		}
 	}))
 
-	assert.NoError(t, a.GatherCandidates())
+	require.NoError(t, a.GatherCandidates())
 
 	<-candidateGathered.Done()
 
-	assert.NoError(t, a.Close())
-	assert.NoError(t, server.Close())
+	require.NoError(t, a.Close())
+	require.NoError(t, server.Close())
 }
 
 func TestCloseConnLog(t *testing.T) {
 	a, err := NewAgent(&AgentConfig{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	closeConnAndLog(nil, a.log, "normal nil")
 
 	var nc *net.UDPConn
 	closeConnAndLog(nc, a.log, "nil ptr")
 
-	assert.NoError(t, a.Close())
+	require.NoError(t, a.Close())
 }
 
 type mockProxy struct {
@@ -582,11 +567,9 @@ func (m *mockProxy) Dial(string, string) (net.Conn, error) {
 }
 
 func TestTURNProxyDialer(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
 	proxyWasDialed, proxyWasDialedFunc := context.WithCancel(context.Background())
 	proxy.RegisterDialerType("tcp", func(*url.URL, proxy.Dialer) (proxy.Dialer, error) {
@@ -594,10 +577,10 @@ func TestTURNProxyDialer(t *testing.T) {
 	})
 
 	tcpProxyURI, err := url.Parse("tcp://fakeproxy:3128")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	proxyDialer, err := proxy.FromURL(tcpProxyURI, proxy.Direct)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	a, err := NewAgent(&AgentConfig{
 		CandidateTypes: []CandidateType{CandidateTypeRelay},
@@ -605,7 +588,7 @@ func TestTURNProxyDialer(t *testing.T) {
 		Urls: []*stun.URI{
 			{
 				Scheme:   stun.SchemeTypeTURN,
-				Host:     "127.0.0.1",
+				Host:     localhostIPStr,
 				Username: "username",
 				Password: "password",
 				Proto:    stun.ProtoTypeTCP,
@@ -614,33 +597,31 @@ func TestTURNProxyDialer(t *testing.T) {
 		},
 		ProxyDialer: proxyDialer,
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	candidateGatherFinish, candidateGatherFinishFunc := context.WithCancel(context.Background())
-	assert.NoError(t, a.OnCandidate(func(c Candidate) {
+	require.NoError(t, a.OnCandidate(func(c Candidate) {
 		if c == nil {
 			candidateGatherFinishFunc()
 		}
 	}))
 
-	assert.NoError(t, a.GatherCandidates())
+	require.NoError(t, a.GatherCandidates())
 	<-candidateGatherFinish.Done()
 	<-proxyWasDialed.Done()
 
-	assert.NoError(t, a.Close())
+	require.NoError(t, a.Close())
 }
 
-// TestUDPMuxDefaultWithNAT1To1IPsUsage asserts that candidates
+// TestUDPMuxDefaultWithNAT1To1IPsUsage requires that candidates
 // are given and connections are valid when using UDPMuxDefault and NAT1To1IPs.
 func TestUDPMuxDefaultWithNAT1To1IPsUsage(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
 	conn, err := net.ListenPacket("udp4", ":0")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		_ = conn.Close()
 	}()
@@ -657,38 +638,36 @@ func TestUDPMuxDefaultWithNAT1To1IPsUsage(t *testing.T) {
 		NAT1To1IPCandidateType: CandidateTypeHost,
 		UDPMux:                 mux,
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	gatherCandidateDone := make(chan struct{})
-	assert.NoError(t, a.OnCandidate(func(c Candidate) {
+	require.NoError(t, a.OnCandidate(func(c Candidate) {
 		if c == nil {
 			close(gatherCandidateDone)
 		} else {
-			assert.Equal(t, "1.2.3.4", c.Address())
+			require.Equal(t, "1.2.3.4", c.Address())
 		}
 	}))
-	assert.NoError(t, a.GatherCandidates())
+	require.NoError(t, a.GatherCandidates())
 	<-gatherCandidateDone
 
-	assert.NotEqual(t, 0, len(mux.connsIPv4))
+	require.NotEqual(t, 0, len(mux.connsIPv4))
 
-	assert.NoError(t, a.Close())
+	require.NoError(t, a.Close())
 }
 
 // Assert that candidates are given for each mux in a MultiUDPMux
 func TestMultiUDPMuxUsage(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
 	var expectedPorts []int
 	var udpMuxInstances []UDPMux
 	for i := 0; i < 3; i++ {
 		port := randomPort(t)
 		conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IP{127, 0, 0, 1}, Port: port})
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		defer func() {
 			_ = conn.Close()
 		}()
@@ -707,38 +686,36 @@ func TestMultiUDPMuxUsage(t *testing.T) {
 		CandidateTypes: []CandidateType{CandidateTypeHost},
 		UDPMux:         NewMultiUDPMuxDefault(udpMuxInstances...),
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	candidateCh := make(chan Candidate)
-	assert.NoError(t, a.OnCandidate(func(c Candidate) {
+	require.NoError(t, a.OnCandidate(func(c Candidate) {
 		if c == nil {
 			close(candidateCh)
 			return
 		}
 		candidateCh <- c
 	}))
-	assert.NoError(t, a.GatherCandidates())
+	require.NoError(t, a.GatherCandidates())
 
 	portFound := make(map[int]bool)
 	for c := range candidateCh {
 		portFound[c.Port()] = true
-		assert.True(t, c.NetworkType().IsUDP(), "All candidates should be UDP")
+		require.True(t, c.NetworkType().IsUDP(), "All candidates should be UDP")
 	}
-	assert.Len(t, portFound, len(expectedPorts))
+	require.Len(t, portFound, len(expectedPorts))
 	for _, port := range expectedPorts {
-		assert.True(t, portFound[port], "There should be a candidate for each UDP mux port")
+		require.True(t, portFound[port], "There should be a candidate for each UDP mux port")
 	}
 
-	assert.NoError(t, a.Close())
+	require.NoError(t, a.Close())
 }
 
 // Assert that candidates are given for each mux in a MultiTCPMux
 func TestMultiTCPMuxUsage(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
 	var expectedPorts []int
 	var tcpMuxInstances []TCPMux
@@ -748,7 +725,7 @@ func TestMultiTCPMuxUsage(t *testing.T) {
 			IP:   net.IP{127, 0, 0, 1},
 			Port: port,
 		})
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		defer func() {
 			_ = listener.Close()
 		}()
@@ -765,17 +742,17 @@ func TestMultiTCPMuxUsage(t *testing.T) {
 		CandidateTypes: []CandidateType{CandidateTypeHost},
 		TCPMux:         NewMultiTCPMuxDefault(tcpMuxInstances...),
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	candidateCh := make(chan Candidate)
-	assert.NoError(t, a.OnCandidate(func(c Candidate) {
+	require.NoError(t, a.OnCandidate(func(c Candidate) {
 		if c == nil {
 			close(candidateCh)
 			return
 		}
 		candidateCh <- c
 	}))
-	assert.NoError(t, a.GatherCandidates())
+	require.NoError(t, a.GatherCandidates())
 
 	portFound := make(map[int]bool)
 	for c := range candidateCh {
@@ -784,24 +761,22 @@ func TestMultiTCPMuxUsage(t *testing.T) {
 			portFound[c.Port()] = true
 		}
 	}
-	assert.Len(t, portFound, len(expectedPorts))
+	require.Len(t, portFound, len(expectedPorts))
 	for _, port := range expectedPorts {
-		assert.True(t, portFound[port], "There should be a candidate for each TCP mux port")
+		require.True(t, portFound[port], "There should be a candidate for each TCP mux port")
 	}
 
-	assert.NoError(t, a.Close())
+	require.NoError(t, a.Close())
 }
 
 // Assert that UniversalUDPMux is used while gathering when configured in the Agent
 func TestUniversalUDPMuxUsage(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IP{127, 0, 0, 1}, Port: randomPort(t)})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		_ = conn.Close()
 	}()
@@ -815,7 +790,7 @@ func TestUniversalUDPMuxUsage(t *testing.T) {
 	for i := 0; i < numSTUNS; i++ {
 		urls = append(urls, &stun.URI{
 			Scheme: SchemeTypeSTUN,
-			Host:   "127.0.0.1",
+			Host:   localhostIPStr,
 			Port:   3478 + i,
 		})
 	}
@@ -826,27 +801,27 @@ func TestUniversalUDPMuxUsage(t *testing.T) {
 		CandidateTypes: []CandidateType{CandidateTypeServerReflexive},
 		UDPMuxSrflx:    udpMuxSrflx,
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	candidateGathered, candidateGatheredFunc := context.WithCancel(context.Background())
-	assert.NoError(t, a.OnCandidate(func(c Candidate) {
+	require.NoError(t, a.OnCandidate(func(c Candidate) {
 		if c == nil {
 			candidateGatheredFunc()
 			return
 		}
 		t.Log(c.NetworkType(), c.Priority(), c)
 	}))
-	assert.NoError(t, a.GatherCandidates())
+	require.NoError(t, a.GatherCandidates())
 
 	<-candidateGathered.Done()
 
-	assert.NoError(t, a.Close())
+	require.NoError(t, a.Close())
 	// Twice because of 2 STUN servers configured
-	assert.Equal(t, numSTUNS, udpMuxSrflx.getXORMappedAddrUsedTimes, "expected times that GetXORMappedAddr should be called")
+	require.Equal(t, numSTUNS, udpMuxSrflx.getXORMappedAddrUsedTimes, "expected times that GetXORMappedAddr should be called")
 	// One for Restart() when agent has been initialized and one time when Close() the agent
-	assert.Equal(t, 2, udpMuxSrflx.removeConnByUfragTimes, "expected times that RemoveConnByUfrag should be called")
+	require.Equal(t, 2, udpMuxSrflx.removeConnByUfragTimes, "expected times that RemoveConnByUfrag should be called")
 	// Twice because of 2 STUN servers configured
-	assert.Equal(t, numSTUNS, udpMuxSrflx.getConnForURLTimes, "expected times that GetConnForURL should be called")
+	require.Equal(t, numSTUNS, udpMuxSrflx.getConnForURLTimes, "expected times that GetConnForURL should be called")
 }
 
 type universalUDPMuxMock struct {

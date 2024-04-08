@@ -20,7 +20,6 @@ import (
 	"github.com/pion/stun/v2"
 	"github.com/pion/transport/v3/test"
 	"github.com/pion/transport/v3/vnet"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -34,30 +33,17 @@ func (ba *BadAddr) String() string {
 	return "yyy"
 }
 
-func runAgentTest(t *testing.T, config *AgentConfig, task func(ctx context.Context, a *Agent)) {
-	a, err := NewAgent(config)
-	if err != nil {
-		t.Fatalf("Error constructing ice.Agent")
-	}
-
-	if err := a.run(context.Background(), task); err != nil {
-		t.Fatalf("Agent run failure: %v", err)
-	}
-
-	assert.NoError(t, a.Close())
-}
-
 func TestHandlePeerReflexive(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	// Limit runtime in case of deadlocks
-	lim := test.TimeOut(time.Second * 2)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 2).Stop()
 
 	t.Run("UDP prflx candidate from handleInbound()", func(t *testing.T) {
-		var config AgentConfig
-		runAgentTest(t, &config, func(ctx context.Context, a *Agent) {
+		a, err := NewAgent(&AgentConfig{})
+		require.NoError(t, err)
+
+		require.NoError(t, a.loop.Run(a.loop, func(_ context.Context) {
 			a.selector = &controllingSelector{agent: a, log: a.log}
 
 			hostConfig := CandidateHostConfig{
@@ -82,9 +68,7 @@ func TestHandlePeerReflexive(t *testing.T) {
 				stun.NewShortTermIntegrity(a.localPwd),
 				stun.Fingerprint,
 			)
-			if err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, err)
 
 			// nolint: contextcheck
 			a.handleInbound(msg, local, remote)
@@ -113,12 +97,15 @@ func TestHandlePeerReflexive(t *testing.T) {
 			if c.Port() != 999 {
 				t.Fatal("Port number mismatch")
 			}
-		})
+		}))
+		require.NoError(t, a.Close())
 	})
 
 	t.Run("Bad network type with handleInbound()", func(t *testing.T) {
-		var config AgentConfig
-		runAgentTest(t, &config, func(ctx context.Context, a *Agent) {
+		a, err := NewAgent(&AgentConfig{})
+		require.NoError(t, err)
+
+		require.NoError(t, a.loop.Run(a.loop, func(_ context.Context) {
 			a.selector = &controllingSelector{agent: a, log: a.log}
 
 			hostConfig := CandidateHostConfig{
@@ -140,12 +127,16 @@ func TestHandlePeerReflexive(t *testing.T) {
 			if len(a.remoteCandidates) != 0 {
 				t.Fatal("bad address should not be added to the remote candidate list")
 			}
-		})
+		}))
+
+		require.NoError(t, a.Close())
 	})
 
 	t.Run("Success from unknown remote, prflx candidate MUST only be created via Binding Request", func(t *testing.T) {
-		var config AgentConfig
-		runAgentTest(t, &config, func(ctx context.Context, a *Agent) {
+		a, err := NewAgent(&AgentConfig{})
+		require.NoError(t, err)
+
+		require.NoError(t, a.loop.Run(a.loop, func(_ context.Context) {
 			a.selector = &controllingSelector{agent: a, log: a.log}
 			tID := [stun.TransactionIDSize]byte{}
 			copy(tID[:], "ABC")
@@ -170,48 +161,46 @@ func TestHandlePeerReflexive(t *testing.T) {
 				stun.NewShortTermIntegrity(a.remotePwd),
 				stun.Fingerprint,
 			)
-			if err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, err)
 
 			// nolint: contextcheck
 			a.handleInbound(msg, local, remote)
 			if len(a.remoteCandidates) != 0 {
 				t.Fatal("unknown remote was able to create a candidate")
 			}
-		})
+		}))
+
+		require.NoError(t, a.Close())
 	})
 }
 
 // Assert that Agent on startup sends message, and doesn't wait for connectivityTicker to fire
 // https://github.com/pion/ice/issues/15
 func TestConnectivityOnStartup(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
 	// Create a network with two interfaces
 	wan, err := vnet.NewRouter(&vnet.RouterConfig{
 		CIDR:          "0.0.0.0/0",
 		LoggerFactory: logging.NewDefaultLoggerFactory(),
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	net0, err := vnet.NewNet(&vnet.NetConfig{
 		StaticIPs: []string{"192.168.0.1"},
 	})
-	assert.NoError(t, err)
-	assert.NoError(t, wan.AddNet(net0))
+	require.NoError(t, err)
+	require.NoError(t, wan.AddNet(net0))
 
 	net1, err := vnet.NewNet(&vnet.NetConfig{
 		StaticIPs: []string{"192.168.0.2"},
 	})
-	assert.NoError(t, err)
-	assert.NoError(t, wan.AddNet(net1))
+	require.NoError(t, err)
+	require.NoError(t, wan.AddNet(net1))
 
-	assert.NoError(t, wan.Start())
+	require.NoError(t, wan.Start())
 
 	aNotifier, aConnected := onConnected()
 	bNotifier, bConnected := onConnected()
@@ -244,10 +233,10 @@ func TestConnectivityOnStartup(t *testing.T) {
 	aConn, bConn := func(aAgent, bAgent *Agent) (*Conn, *Conn) {
 		// Manual signaling
 		aUfrag, aPwd, err := aAgent.GetLocalUserCredentials()
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		bUfrag, bPwd, err := bAgent.GetLocalUserCredentials()
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		gatherAndExchangeCandidates(aAgent, bAgent)
 
@@ -290,18 +279,14 @@ func TestConnectivityOnStartup(t *testing.T) {
 	<-aConnected
 	<-bConnected
 
-	assert.NoError(t, wan.Stop())
-	if !closePipe(t, aConn, bConn) {
-		return
-	}
+	require.NoError(t, wan.Stop())
+	closePipe(t, aConn, bConn)
 }
 
 func TestConnectivityLite(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
 	stunServerURL := &stun.URI{
 		Scheme: SchemeTypeSTUN,
@@ -352,14 +337,11 @@ func TestConnectivityLite(t *testing.T) {
 	<-aConnected
 	<-bConnected
 
-	if !closePipe(t, aConn, bConn) {
-		return
-	}
+	closePipe(t, aConn, bConn)
 }
 
 func TestInboundValidity(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	buildMsg := func(class stun.MessageClass, username, key string) *stun.Message {
 		msg, err := stun.Build(stun.NewType(stun.MethodBinding, class), stun.TransactionID,
@@ -367,9 +349,7 @@ func TestInboundValidity(t *testing.T) {
 			stun.NewShortTermIntegrity(key),
 			stun.Fingerprint,
 		)
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err)
 
 		return msg
 	}
@@ -403,7 +383,7 @@ func TestInboundValidity(t *testing.T) {
 			t.Fatal("Binding with invalid MessageIntegrity was able to create prflx candidate")
 		}
 
-		assert.NoError(t, a.Close())
+		require.NoError(t, a.Close())
 	})
 
 	t.Run("Invalid Binding success responses should be discarded", func(t *testing.T) {
@@ -417,7 +397,7 @@ func TestInboundValidity(t *testing.T) {
 			t.Fatal("Binding with invalid MessageIntegrity was able to create prflx candidate")
 		}
 
-		assert.NoError(t, a.Close())
+		require.NoError(t, a.Close())
 	})
 
 	t.Run("Discard non-binding messages", func(t *testing.T) {
@@ -431,7 +411,7 @@ func TestInboundValidity(t *testing.T) {
 			t.Fatal("non-binding message was able to create prflxRemote")
 		}
 
-		assert.NoError(t, a.Close())
+		require.NoError(t, a.Close())
 	})
 
 	t.Run("Valid bind request", func(t *testing.T) {
@@ -440,7 +420,7 @@ func TestInboundValidity(t *testing.T) {
 			t.Fatalf("Error constructing ice.Agent")
 		}
 
-		err = a.run(context.Background(), func(ctx context.Context, a *Agent) {
+		err = a.loop.Run(a.loop, func(_ context.Context) {
 			a.selector = &controllingSelector{agent: a, log: a.log}
 			// nolint: contextcheck
 			a.handleInbound(buildMsg(stun.ClassRequest, a.localUfrag+":"+a.remoteUfrag, a.localPwd), local, remote)
@@ -449,28 +429,30 @@ func TestInboundValidity(t *testing.T) {
 			}
 		})
 
-		assert.NoError(t, err)
-		assert.NoError(t, a.Close())
+		require.NoError(t, err)
+		require.NoError(t, a.Close())
 	})
 
 	t.Run("Valid bind without fingerprint", func(t *testing.T) {
-		var config AgentConfig
-		runAgentTest(t, &config, func(ctx context.Context, a *Agent) {
+		a, err := NewAgent(&AgentConfig{})
+		require.NoError(t, err)
+
+		require.NoError(t, a.loop.Run(a.loop, func(_ context.Context) {
 			a.selector = &controllingSelector{agent: a, log: a.log}
 			msg, err := stun.Build(stun.BindingRequest, stun.TransactionID,
 				stun.NewUsername(a.localUfrag+":"+a.remoteUfrag),
 				stun.NewShortTermIntegrity(a.localPwd),
 			)
-			if err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, err)
 
 			// nolint: contextcheck
 			a.handleInbound(msg, local, remote)
 			if len(a.remoteCandidates) != 1 {
 				t.Fatal("Binding with valid values (but no fingerprint) was unable to create prflx candidate")
 			}
-		})
+		}))
+
+		require.NoError(t, a.Close())
 	})
 
 	t.Run("Success with invalid TransactionID", func(t *testing.T) {
@@ -498,23 +480,22 @@ func TestInboundValidity(t *testing.T) {
 			stun.NewShortTermIntegrity(a.remotePwd),
 			stun.Fingerprint,
 		)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		a.handleInbound(msg, local, remote)
 		if len(a.remoteCandidates) != 0 {
 			t.Fatal("unknown remote was able to create a candidate")
 		}
 
-		assert.NoError(t, a.Close())
+		require.NoError(t, a.Close())
 	})
 }
 
 func TestInvalidAgentStarts(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	a, err := NewAgent(&AgentConfig{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	ctx := context.Background()
 	ctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
@@ -536,16 +517,14 @@ func TestInvalidAgentStarts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	assert.NoError(t, a.Close())
+	require.NoError(t, a.Close())
 }
 
 // Assert that Agent emits Connecting/Connected/Disconnected/Failed/Closed messages
 func TestConnectionStateCallback(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 5)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 5).Stop()
 
 	disconnectedDuration := time.Second
 	failedDuration := time.Second
@@ -557,17 +536,14 @@ func TestConnectionStateCallback(t *testing.T) {
 		DisconnectedTimeout: &disconnectedDuration,
 		FailedTimeout:       &failedDuration,
 		KeepaliveInterval:   &KeepaliveInterval,
+		InterfaceFilter:     problematicNetworkInterfaces,
 	}
 
 	aAgent, err := NewAgent(cfg)
-	if err != nil {
-		t.Error(err)
-	}
+	require.NoError(t, err)
 
 	bAgent, err := NewAgent(cfg)
-	if err != nil {
-		t.Error(err)
-	}
+	require.NoError(t, err)
 
 	isChecking := make(chan interface{})
 	isConnected := make(chan interface{})
@@ -589,9 +565,7 @@ func TestConnectionStateCallback(t *testing.T) {
 		default:
 		}
 	})
-	if err != nil {
-		t.Error(err)
-	}
+	require.NoError(t, err)
 
 	connect(aAgent, bAgent)
 
@@ -600,8 +574,8 @@ func TestConnectionStateCallback(t *testing.T) {
 	<-isDisconnected
 	<-isFailed
 
-	assert.NoError(t, aAgent.Close())
-	assert.NoError(t, bAgent.Close())
+	require.NoError(t, aAgent.Close())
+	require.NoError(t, bAgent.Close())
 
 	<-isClosed
 }
@@ -617,13 +591,12 @@ func TestInvalidGather(t *testing.T) {
 		if !errors.Is(err, ErrNoOnCandidateHandler) {
 			t.Fatal("trickle GatherCandidates succeeded without OnCandidate")
 		}
-		assert.NoError(t, a.Close())
+		require.NoError(t, a.Close())
 	})
 }
 
 func TestCandidatePairStats(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	// Avoid deadlocks?
 	defer test.TimeOut(1 * time.Second).Stop()
@@ -751,12 +724,11 @@ func TestCandidatePairStats(t *testing.T) {
 			prflxPairStat.State.String())
 	}
 
-	assert.NoError(t, a.Close())
+	require.NoError(t, a.Close())
 }
 
 func TestLocalCandidateStats(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	// Avoid deadlocks?
 	defer test.TimeOut(1 * time.Second).Stop()
@@ -832,12 +804,11 @@ func TestLocalCandidateStats(t *testing.T) {
 		t.Fatal("missing srflx local stat")
 	}
 
-	assert.NoError(t, a.Close())
+	require.NoError(t, a.Close())
 }
 
 func TestRemoteCandidateStats(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	// Avoid deadlocks?
 	defer test.TimeOut(1 * time.Second).Stop()
@@ -952,12 +923,11 @@ func TestRemoteCandidateStats(t *testing.T) {
 		t.Fatal("missing host remote stat")
 	}
 
-	assert.NoError(t, a.Close())
+	require.NoError(t, a.Close())
 }
 
 func TestInitExtIPMapping(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	// a.extIPMapper should be nil by default
 	a, err := NewAgent(&AgentConfig{})
@@ -967,7 +937,7 @@ func TestInitExtIPMapping(t *testing.T) {
 	if a.extIPMapper != nil {
 		t.Fatal("a.extIPMapper should be nil by default")
 	}
-	assert.NoError(t, a.Close())
+	require.NoError(t, a.Close())
 
 	// a.extIPMapper should be nil when NAT1To1IPs is a non-nil empty array
 	a, err = NewAgent(&AgentConfig{
@@ -980,7 +950,7 @@ func TestInitExtIPMapping(t *testing.T) {
 	if a.extIPMapper != nil {
 		t.Fatal("a.extIPMapper should be nil by default")
 	}
-	assert.NoError(t, a.Close())
+	require.NoError(t, a.Close())
 
 	// NewAgent should return an error when 1:1 NAT for host candidate is enabled
 	// but the candidate type does not appear in the CandidateTypes.
@@ -1026,13 +996,12 @@ func TestInitExtIPMapping(t *testing.T) {
 }
 
 func TestBindingRequestTimeout(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	const expectedRemovalCount = 2
 
 	a, err := NewAgent(&AgentConfig{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	now := time.Now()
 	a.pendingBindingRequests = append(a.pendingBindingRequests, bindingRequest{
@@ -1049,15 +1018,14 @@ func TestBindingRequestTimeout(t *testing.T) {
 	})
 
 	a.invalidatePendingBindingRequests(now)
-	assert.Equal(t, expectedRemovalCount, len(a.pendingBindingRequests), "Binding invalidation due to timeout did not remove the correct number of binding requests")
-	assert.NoError(t, a.Close())
+	require.Equal(t, expectedRemovalCount, len(a.pendingBindingRequests), "Binding invalidation due to timeout did not remove the correct number of binding requests")
+	require.NoError(t, a.Close())
 }
 
 // TestAgentCredentials checks if local username fragments and passwords (if set) meet RFC standard
 // and ensure it's backwards compatible with previous versions of the pion/ice
 func TestAgentCredentials(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	// Make sure to pass Travis check by disabling the logs
 	log := logging.NewDefaultLoggerFactory()
@@ -1067,10 +1035,10 @@ func TestAgentCredentials(t *testing.T) {
 	// If set, they should follow the default 16/128 bits random number generator strategy
 
 	agent, err := NewAgent(&AgentConfig{LoggerFactory: log})
-	assert.NoError(t, err)
-	assert.GreaterOrEqual(t, len([]rune(agent.localUfrag))*8, 24)
-	assert.GreaterOrEqual(t, len([]rune(agent.localPwd))*8, 128)
-	assert.NoError(t, agent.Close())
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len([]rune(agent.localUfrag))*8, 24)
+	require.GreaterOrEqual(t, len([]rune(agent.localPwd))*8, 128)
+	require.NoError(t, agent.Close())
 
 	// Should honor RFC standards
 	// Local values MUST be unguessable, with at least 128 bits of
@@ -1078,20 +1046,18 @@ func TestAgentCredentials(t *testing.T) {
 	// at least 24 bits of output to generate the username fragment.
 
 	_, err = NewAgent(&AgentConfig{LocalUfrag: "xx", LoggerFactory: log})
-	assert.EqualError(t, err, ErrLocalUfragInsufficientBits.Error())
+	require.EqualError(t, err, ErrLocalUfragInsufficientBits.Error())
 
 	_, err = NewAgent(&AgentConfig{LocalPwd: "xxxxxx", LoggerFactory: log})
-	assert.EqualError(t, err, ErrLocalPwdInsufficientBits.Error())
+	require.EqualError(t, err, ErrLocalPwdInsufficientBits.Error())
 }
 
 // Assert that Agent on Failure deletes all existing candidates
 // User can then do an ICE Restart to bring agent back
 func TestConnectionStateFailedDeleteAllCandidates(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 5)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 5).Stop()
 
 	oneSecond := time.Second
 	KeepaliveInterval := time.Duration(0)
@@ -1104,13 +1070,13 @@ func TestConnectionStateFailedDeleteAllCandidates(t *testing.T) {
 	}
 
 	aAgent, err := NewAgent(cfg)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	bAgent, err := NewAgent(cfg)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	isFailed := make(chan interface{})
-	assert.NoError(t, aAgent.OnConnectionStateChange(func(c ConnectionState) {
+	require.NoError(t, aAgent.OnConnectionStateChange(func(c ConnectionState) {
 		if c == ConnectionStateFailed {
 			close(isFailed)
 		}
@@ -1120,24 +1086,22 @@ func TestConnectionStateFailedDeleteAllCandidates(t *testing.T) {
 	<-isFailed
 
 	done := make(chan struct{})
-	assert.NoError(t, aAgent.run(context.Background(), func(ctx context.Context, agent *Agent) {
-		assert.Equal(t, len(aAgent.remoteCandidates), 0)
-		assert.Equal(t, len(aAgent.localCandidates), 0)
+	require.NoError(t, aAgent.loop.Run(context.Background(), func(context.Context) {
+		require.Equal(t, len(aAgent.remoteCandidates), 0)
+		require.Equal(t, len(aAgent.localCandidates), 0)
 		close(done)
 	}))
 	<-done
 
-	assert.NoError(t, aAgent.Close())
-	assert.NoError(t, bAgent.Close())
+	require.NoError(t, aAgent.Close())
+	require.NoError(t, bAgent.Close())
 }
 
 // Assert that the ICE Agent can go directly from Connecting -> Failed on both sides
 func TestConnectionStateConnectingToFailed(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 5)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 5).Stop()
 
 	oneSecond := time.Second
 	KeepaliveInterval := time.Duration(0)
@@ -1149,10 +1113,10 @@ func TestConnectionStateConnectingToFailed(t *testing.T) {
 	}
 
 	aAgent, err := NewAgent(cfg)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	bAgent, err := NewAgent(cfg)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	var isFailed sync.WaitGroup
 	var isChecking sync.WaitGroup
@@ -1172,32 +1136,30 @@ func TestConnectionStateConnectingToFailed(t *testing.T) {
 		}
 	}
 
-	assert.NoError(t, aAgent.OnConnectionStateChange(connectionStateCheck))
-	assert.NoError(t, bAgent.OnConnectionStateChange(connectionStateCheck))
+	require.NoError(t, aAgent.OnConnectionStateChange(connectionStateCheck))
+	require.NoError(t, bAgent.OnConnectionStateChange(connectionStateCheck))
 
 	go func() {
 		_, err := aAgent.Accept(context.TODO(), "InvalidFrag", "InvalidPwd")
-		assert.Error(t, err)
+		require.Error(t, err)
 	}()
 
 	go func() {
 		_, err := bAgent.Dial(context.TODO(), "InvalidFrag", "InvalidPwd")
-		assert.Error(t, err)
+		require.Error(t, err)
 	}()
 
 	isChecking.Wait()
 	isFailed.Wait()
 
-	assert.NoError(t, aAgent.Close())
-	assert.NoError(t, bAgent.Close())
+	require.NoError(t, aAgent.Close())
+	require.NoError(t, bAgent.Close())
 }
 
 func TestAgentRestart(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
 	oneSecond := time.Second
 
@@ -1208,26 +1170,26 @@ func TestAgentRestart(t *testing.T) {
 		})
 
 		ctx, cancel := context.WithCancel(context.Background())
-		assert.NoError(t, connB.agent.OnConnectionStateChange(func(c ConnectionState) {
+		require.NoError(t, connB.agent.OnConnectionStateChange(func(c ConnectionState) {
 			if c == ConnectionStateFailed || c == ConnectionStateDisconnected {
 				cancel()
 			}
 		}))
 
 		connA.agent.gatheringState = GatheringStateGathering
-		assert.NoError(t, connA.agent.Restart("", ""))
+		require.NoError(t, connA.agent.Restart("", ""))
 
 		<-ctx.Done()
-		assert.NoError(t, connA.agent.Close())
-		assert.NoError(t, connB.agent.Close())
+		require.NoError(t, connA.agent.Close())
+		require.NoError(t, connB.agent.Close())
 	})
 
 	t.Run("Restart When Closed", func(t *testing.T) {
 		agent, err := NewAgent(&AgentConfig{})
-		assert.NoError(t, err)
-		assert.NoError(t, agent.Close())
+		require.NoError(t, err)
+		require.NoError(t, agent.Close())
 
-		assert.Equal(t, ErrClosed, agent.Restart("", ""))
+		require.Equal(t, ErrClosed, agent.Restart("", ""))
 	})
 
 	t.Run("Restart One Side", func(t *testing.T) {
@@ -1237,22 +1199,22 @@ func TestAgentRestart(t *testing.T) {
 		})
 
 		ctx, cancel := context.WithCancel(context.Background())
-		assert.NoError(t, connB.agent.OnConnectionStateChange(func(c ConnectionState) {
+		require.NoError(t, connB.agent.OnConnectionStateChange(func(c ConnectionState) {
 			if c == ConnectionStateFailed || c == ConnectionStateDisconnected {
 				cancel()
 			}
 		}))
-		assert.NoError(t, connA.agent.Restart("", ""))
+		require.NoError(t, connA.agent.Restart("", ""))
 
 		<-ctx.Done()
-		assert.NoError(t, connA.agent.Close())
-		assert.NoError(t, connB.agent.Close())
+		require.NoError(t, connA.agent.Close())
+		require.NoError(t, connB.agent.Close())
 	})
 
 	t.Run("Restart Both Sides", func(t *testing.T) {
 		// Get all addresses of candidates concatenated
 		generateCandidateAddressStrings := func(candidates []Candidate, err error) (out string) {
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			for _, c := range candidates {
 				out += c.Address() + ":"
@@ -1270,23 +1232,23 @@ func TestAgentRestart(t *testing.T) {
 		connBFirstCandidates := generateCandidateAddressStrings(connB.agent.GetLocalCandidates())
 
 		aNotifier, aConnected := onConnected()
-		assert.NoError(t, connA.agent.OnConnectionStateChange(aNotifier))
+		require.NoError(t, connA.agent.OnConnectionStateChange(aNotifier))
 
 		bNotifier, bConnected := onConnected()
-		assert.NoError(t, connB.agent.OnConnectionStateChange(bNotifier))
+		require.NoError(t, connB.agent.OnConnectionStateChange(bNotifier))
 
 		// Restart and Re-Signal
-		assert.NoError(t, connA.agent.Restart("", ""))
-		assert.NoError(t, connB.agent.Restart("", ""))
+		require.NoError(t, connA.agent.Restart("", ""))
+		require.NoError(t, connB.agent.Restart("", ""))
 
 		// Exchange Candidates and Credentials
 		ufrag, pwd, err := connB.agent.GetLocalUserCredentials()
-		assert.NoError(t, err)
-		assert.NoError(t, connA.agent.SetRemoteCredentials(ufrag, pwd))
+		require.NoError(t, err)
+		require.NoError(t, connA.agent.SetRemoteCredentials(ufrag, pwd))
 
 		ufrag, pwd, err = connA.agent.GetLocalUserCredentials()
-		assert.NoError(t, err)
-		assert.NoError(t, connB.agent.SetRemoteCredentials(ufrag, pwd))
+		require.NoError(t, err)
+		require.NoError(t, connB.agent.SetRemoteCredentials(ufrag, pwd))
 
 		gatherAndExchangeCandidates(connA.agent, connB.agent)
 
@@ -1295,11 +1257,11 @@ func TestAgentRestart(t *testing.T) {
 		<-bConnected
 
 		// Assert that we have new candidates each time
-		assert.NotEqual(t, connAFirstCandidates, generateCandidateAddressStrings(connA.agent.GetLocalCandidates()))
-		assert.NotEqual(t, connBFirstCandidates, generateCandidateAddressStrings(connB.agent.GetLocalCandidates()))
+		require.NotEqual(t, connAFirstCandidates, generateCandidateAddressStrings(connA.agent.GetLocalCandidates()))
+		require.NotEqual(t, connBFirstCandidates, generateCandidateAddressStrings(connB.agent.GetLocalCandidates()))
 
-		assert.NoError(t, connA.agent.Close())
-		assert.NoError(t, connB.agent.Close())
+		require.NoError(t, connA.agent.Close())
+		require.NoError(t, connB.agent.Close())
 	})
 }
 
@@ -1314,12 +1276,12 @@ func TestGetRemoteCredentials(t *testing.T) {
 	a.remotePwd = "remotePwd"
 
 	actualUfrag, actualPwd, err := a.GetRemoteUserCredentials()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	assert.Equal(t, actualUfrag, a.remoteUfrag)
-	assert.Equal(t, actualPwd, a.remotePwd)
+	require.Equal(t, actualUfrag, a.remoteUfrag)
+	require.Equal(t, actualPwd, a.remotePwd)
 
-	assert.NoError(t, a.Close())
+	require.NoError(t, a.Close())
 }
 
 func TestGetRemoteCandidates(t *testing.T) {
@@ -1341,7 +1303,7 @@ func TestGetRemoteCandidates(t *testing.T) {
 		}
 
 		cand, errCand := NewCandidateHost(&cfg)
-		assert.NoError(t, errCand)
+		require.NoError(t, errCand)
 
 		expectedCandidates = append(expectedCandidates, cand)
 
@@ -1349,10 +1311,10 @@ func TestGetRemoteCandidates(t *testing.T) {
 	}
 
 	actualCandidates, err := a.GetRemoteCandidates()
-	assert.NoError(t, err)
-	assert.ElementsMatch(t, expectedCandidates, actualCandidates)
+	require.NoError(t, err)
+	require.ElementsMatch(t, expectedCandidates, actualCandidates)
 
-	assert.NoError(t, a.Close())
+	require.NoError(t, a.Close())
 }
 
 func TestGetLocalCandidates(t *testing.T) {
@@ -1375,27 +1337,25 @@ func TestGetLocalCandidates(t *testing.T) {
 		}
 
 		cand, errCand := NewCandidateHost(&cfg)
-		assert.NoError(t, errCand)
+		require.NoError(t, errCand)
 
 		expectedCandidates = append(expectedCandidates, cand)
 
 		err = a.addCandidate(context.Background(), cand, dummyConn)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 	}
 
 	actualCandidates, err := a.GetLocalCandidates()
-	assert.NoError(t, err)
-	assert.ElementsMatch(t, expectedCandidates, actualCandidates)
+	require.NoError(t, err)
+	require.ElementsMatch(t, expectedCandidates, actualCandidates)
 
-	assert.NoError(t, a.Close())
+	require.NoError(t, a.Close())
 }
 
 func TestCloseInConnectionStateCallback(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 5)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 5).Stop()
 
 	disconnectedDuration := time.Second
 	failedDuration := time.Second
@@ -1412,14 +1372,10 @@ func TestCloseInConnectionStateCallback(t *testing.T) {
 	}
 
 	aAgent, err := NewAgent(cfg)
-	if err != nil {
-		t.Error(err)
-	}
+	require.NoError(t, err)
 
 	bAgent, err := NewAgent(cfg)
-	if err != nil {
-		t.Error(err)
-	}
+	require.NoError(t, err)
 
 	isClosed := make(chan interface{})
 	isConnected := make(chan interface{})
@@ -1427,29 +1383,25 @@ func TestCloseInConnectionStateCallback(t *testing.T) {
 		switch c {
 		case ConnectionStateConnected:
 			<-isConnected
-			assert.NoError(t, aAgent.Close())
+			require.NoError(t, aAgent.Close())
 		case ConnectionStateClosed:
 			close(isClosed)
 		default:
 		}
 	})
-	if err != nil {
-		t.Error(err)
-	}
+	require.NoError(t, err)
 
 	connect(aAgent, bAgent)
 	close(isConnected)
 
 	<-isClosed
-	assert.NoError(t, bAgent.Close())
+	require.NoError(t, bAgent.Close())
 }
 
 func TestRunTaskInConnectionStateCallback(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 5)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 5).Stop()
 
 	oneSecond := time.Second
 	KeepaliveInterval := time.Duration(0)
@@ -1473,28 +1425,24 @@ func TestRunTaskInConnectionStateCallback(t *testing.T) {
 	err = aAgent.OnConnectionStateChange(func(c ConnectionState) {
 		if c == ConnectionStateConnected {
 			_, _, errCred := aAgent.GetLocalUserCredentials()
-			assert.NoError(t, errCred)
-			assert.NoError(t, aAgent.Restart("", ""))
+			require.NoError(t, errCred)
+			require.NoError(t, aAgent.Restart("", ""))
 			close(isComplete)
 		}
 	})
-	if err != nil {
-		t.Error(err)
-	}
+	require.NoError(t, err)
 
 	connect(aAgent, bAgent)
 
 	<-isComplete
-	assert.NoError(t, aAgent.Close())
-	assert.NoError(t, bAgent.Close())
+	require.NoError(t, aAgent.Close())
+	require.NoError(t, bAgent.Close())
 }
 
 func TestRunTaskInSelectedCandidatePairChangeCallback(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 5)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 5).Stop()
 
 	oneSecond := time.Second
 	KeepaliveInterval := time.Duration(0)
@@ -1519,7 +1467,7 @@ func TestRunTaskInSelectedCandidatePairChangeCallback(t *testing.T) {
 	if err = aAgent.OnSelectedCandidatePairChange(func(Candidate, Candidate) {
 		go func() {
 			_, _, errCred := aAgent.GetLocalUserCredentials()
-			assert.NoError(t, errCred)
+			require.NoError(t, errCred)
 			close(isTested)
 		}()
 	}); err != nil {
@@ -1537,17 +1485,15 @@ func TestRunTaskInSelectedCandidatePairChangeCallback(t *testing.T) {
 
 	<-isComplete
 	<-isTested
-	assert.NoError(t, aAgent.Close())
-	assert.NoError(t, bAgent.Close())
+	require.NoError(t, aAgent.Close())
+	require.NoError(t, bAgent.Close())
 }
 
 // Assert that a Lite agent goes to disconnected and failed
 func TestLiteLifecycle(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
 	aNotifier, aConnected := onConnected()
 
@@ -1594,49 +1540,47 @@ func TestLiteLifecycle(t *testing.T) {
 
 	<-aConnected
 	<-bConnected
-	assert.NoError(t, aAgent.Close())
+	require.NoError(t, aAgent.Close())
 
 	<-bDisconnected
 	<-bFailed
-	assert.NoError(t, bAgent.Close())
+	require.NoError(t, bAgent.Close())
 }
 
 func TestNilCandidate(t *testing.T) {
 	a, err := NewAgent(&AgentConfig{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	assert.NoError(t, a.AddRemoteCandidate(nil))
-	assert.NoError(t, a.Close())
+	require.NoError(t, a.AddRemoteCandidate(nil))
+	require.NoError(t, a.Close())
 }
 
 func TestNilCandidatePair(t *testing.T) {
 	a, err := NewAgent(&AgentConfig{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	a.setSelectedPair(nil)
-	assert.NoError(t, a.Close())
+	require.NoError(t, a.Close())
 }
 
 func TestGetSelectedCandidatePair(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
 	wan, err := vnet.NewRouter(&vnet.RouterConfig{
 		CIDR:          "0.0.0.0/0",
 		LoggerFactory: logging.NewDefaultLoggerFactory(),
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	net, err := vnet.NewNet(&vnet.NetConfig{
 		StaticIPs: []string{"192.168.0.1"},
 	})
-	assert.NoError(t, err)
-	assert.NoError(t, wan.AddNet(net))
+	require.NoError(t, err)
+	require.NoError(t, wan.AddNet(net))
 
-	assert.NoError(t, wan.Start())
+	require.NoError(t, wan.Start())
 
 	cfg := &AgentConfig{
 		NetworkTypes: supportedNetworkTypes(),
@@ -1644,64 +1588,62 @@ func TestGetSelectedCandidatePair(t *testing.T) {
 	}
 
 	aAgent, err := NewAgent(cfg)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	bAgent, err := NewAgent(cfg)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	aAgentPair, err := aAgent.GetSelectedCandidatePair()
-	assert.NoError(t, err)
-	assert.Nil(t, aAgentPair)
+	require.NoError(t, err)
+	require.Nil(t, aAgentPair)
 
 	bAgentPair, err := bAgent.GetSelectedCandidatePair()
-	assert.NoError(t, err)
-	assert.Nil(t, bAgentPair)
+	require.NoError(t, err)
+	require.Nil(t, bAgentPair)
 
 	connect(aAgent, bAgent)
 
 	aAgentPair, err = aAgent.GetSelectedCandidatePair()
-	assert.NoError(t, err)
-	assert.NotNil(t, aAgentPair)
+	require.NoError(t, err)
+	require.NotNil(t, aAgentPair)
 
 	bAgentPair, err = bAgent.GetSelectedCandidatePair()
-	assert.NoError(t, err)
-	assert.NotNil(t, bAgentPair)
+	require.NoError(t, err)
+	require.NotNil(t, bAgentPair)
 
-	assert.True(t, bAgentPair.Local.Equal(aAgentPair.Remote))
-	assert.True(t, bAgentPair.Remote.Equal(aAgentPair.Local))
+	require.True(t, bAgentPair.Local.Equal(aAgentPair.Remote))
+	require.True(t, bAgentPair.Remote.Equal(aAgentPair.Local))
 
-	assert.NoError(t, wan.Stop())
-	assert.NoError(t, aAgent.Close())
-	assert.NoError(t, bAgent.Close())
+	require.NoError(t, wan.Stop())
+	require.NoError(t, aAgent.Close())
+	require.NoError(t, bAgent.Close())
 }
 
 func TestAcceptAggressiveNomination(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
 	// Create a network with two interfaces
 	wan, err := vnet.NewRouter(&vnet.RouterConfig{
 		CIDR:          "0.0.0.0/0",
 		LoggerFactory: logging.NewDefaultLoggerFactory(),
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	net0, err := vnet.NewNet(&vnet.NetConfig{
 		StaticIPs: []string{"192.168.0.1"},
 	})
-	assert.NoError(t, err)
-	assert.NoError(t, wan.AddNet(net0))
+	require.NoError(t, err)
+	require.NoError(t, wan.AddNet(net0))
 
 	net1, err := vnet.NewNet(&vnet.NetConfig{
 		StaticIPs: []string{"192.168.0.2", "192.168.0.3", "192.168.0.4"},
 	})
-	assert.NoError(t, err)
-	assert.NoError(t, wan.AddNet(net1))
+	require.NoError(t, err)
+	require.NoError(t, wan.AddNet(net1))
 
-	assert.NoError(t, wan.Start())
+	require.NoError(t, wan.Start())
 
 	aNotifier, aConnected := onConnected()
 	bNotifier, bConnected := onConnected()
@@ -1750,9 +1692,7 @@ func TestAcceptAggressiveNomination(t *testing.T) {
 			PriorityAttr(priority),
 			stun.Fingerprint,
 		)
-		if err1 != nil {
-			t.Fatal(err1)
-		}
+		require.NoError(t, err1)
 
 		return msg
 	}
@@ -1789,13 +1729,11 @@ func TestAcceptAggressiveNomination(t *testing.T) {
 	time.Sleep(1 * time.Second)
 	select {
 	case selected := <-selectedCh:
-		assert.True(t, selected.Equal(expectNewSelectedCandidate))
+		require.True(t, selected.Equal(expectNewSelectedCandidate))
 	default:
 		t.Fatal("No selected candidate pair")
 	}
 
-	assert.NoError(t, wan.Stop())
-	if !closePipe(t, aConn, bConn) {
-		return
-	}
+	require.NoError(t, wan.Stop())
+	closePipe(t, aConn, bConn)
 }

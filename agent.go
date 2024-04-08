@@ -9,16 +9,16 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"strconv"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	atomicx "github.com/pion/ice/v3/internal/atomic"
 	stunx "github.com/pion/ice/v3/internal/stun"
+	"github.com/pion/ice/v3/internal/taskloop"
 	"github.com/pion/logging"
-	"github.com/pion/mdns"
+	"github.com/pion/mdns/v2"
 	"github.com/pion/stun/v2"
 	"github.com/pion/transport/v3"
 	"github.com/pion/transport/v3/packetio"
@@ -36,15 +36,12 @@ type bindingRequest struct {
 
 // Agent represents the ICE agent
 type Agent struct {
-	chanTask   chan task
-	afterRunFn []func(ctx context.Context)
-	muAfterRun sync.Mutex
+	loop *taskloop.Loop
 
 	onConnectionStateChangeHdlr       atomic.Value // func(ConnectionState)
 	onSelectedCandidatePairChangeHdlr atomic.Value // func(Candidate, Candidate)
 	onCandidateHdlr                   atomic.Value // func(Candidate)
 
-	// State owned by the taskLoop
 	onConnected     chan struct{}
 	onConnectedOnce sync.Once
 
@@ -72,6 +69,7 @@ type Agent struct {
 	srflxAcceptanceMinWait time.Duration
 	prflxAcceptanceMinWait time.Duration
 	relayAcceptanceMinWait time.Duration
+	stunGatherTimeout      time.Duration
 
 	tcpPriorityOffset uint16
 	disableActiveTCP  bool
@@ -123,17 +121,12 @@ type Agent struct {
 	// 1:1 D-NAT IP address mapping
 	extIPMapper *externalIPMapper
 
-	// State for closing
-	done         chan struct{}
-	taskLoopDone chan struct{}
-	err          atomicx.Error
-
 	gatherCandidateCancel func()
 	gatherCandidateDone   chan struct{}
 
-	chanCandidate     chan Candidate
-	chanCandidatePair chan *CandidatePair
-	chanState         chan ConnectionState
+	connectionStateNotifier       *handlerNotifier
+	candidateNotifier             *handlerNotifier
+	selectedCandidatePairNotifier *handlerNotifier
 
 	loggerFactory logging.LoggerFactory
 	log           logging.LeveledLogger
@@ -150,102 +143,6 @@ type Agent struct {
 	insecureSkipVerify bool
 
 	proxyDialer proxy.Dialer
-}
-
-type task struct {
-	fn   func(context.Context, *Agent)
-	done chan struct{}
-}
-
-// afterRun registers function to be run after the task.
-func (a *Agent) afterRun(f func(context.Context)) {
-	a.muAfterRun.Lock()
-	a.afterRunFn = append(a.afterRunFn, f)
-	a.muAfterRun.Unlock()
-}
-
-func (a *Agent) getAfterRunFn() []func(context.Context) {
-	a.muAfterRun.Lock()
-	defer a.muAfterRun.Unlock()
-	fns := a.afterRunFn
-	a.afterRunFn = nil
-	return fns
-}
-
-func (a *Agent) ok() error {
-	select {
-	case <-a.done:
-		return a.getErr()
-	default:
-	}
-	return nil
-}
-
-func (a *Agent) getErr() error {
-	if err := a.err.Load(); err != nil {
-		return err
-	}
-	return ErrClosed
-}
-
-// Run task in serial. Blocking tasks must be cancelable by context.
-func (a *Agent) run(ctx context.Context, t func(context.Context, *Agent)) error {
-	if err := a.ok(); err != nil {
-		return err
-	}
-	done := make(chan struct{})
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case a.chanTask <- task{t, done}:
-		<-done
-		return nil
-	}
-}
-
-// taskLoop handles registered tasks and agent close.
-func (a *Agent) taskLoop() {
-	after := func() {
-		for {
-			// Get and run func registered by afterRun().
-			fns := a.getAfterRunFn()
-			if len(fns) == 0 {
-				break
-			}
-			for _, fn := range fns {
-				fn(a.context())
-			}
-		}
-	}
-	defer func() {
-		a.deleteAllCandidates()
-		a.startedFn()
-
-		if err := a.buf.Close(); err != nil {
-			a.log.Warnf("Failed to close buffer: %v", err)
-		}
-
-		a.closeMulticastConn()
-		a.updateConnectionState(ConnectionStateClosed)
-
-		after()
-
-		close(a.chanState)
-		close(a.chanCandidate)
-		close(a.chanCandidatePair)
-		close(a.taskLoopDone)
-	}()
-
-	for {
-		select {
-		case <-a.done:
-			return
-		case t := <-a.chanTask:
-			t.fn(a.context(), a)
-			close(t.done)
-			after()
-		}
-	}
 }
 
 // NewAgent creates a new Agent
@@ -280,33 +177,27 @@ func NewAgent(config *AgentConfig) (*Agent, error) { //nolint:gocognit
 	startedCtx, startedFn := context.WithCancel(context.Background())
 
 	a := &Agent{
-		chanTask:          make(chan task),
-		chanState:         make(chan ConnectionState),
-		chanCandidate:     make(chan Candidate),
-		chanCandidatePair: make(chan *CandidatePair),
-		tieBreaker:        globalMathRandomGenerator.Uint64(),
-		lite:              config.Lite,
-		gatheringState:    GatheringStateNew,
-		connectionState:   ConnectionStateNew,
-		localCandidates:   make(map[NetworkType][]Candidate),
-		remoteCandidates:  make(map[NetworkType][]Candidate),
-		urls:              config.Urls,
-		networkTypes:      config.NetworkTypes,
-		onConnected:       make(chan struct{}),
-		buf:               packetio.NewBuffer(),
-		done:              make(chan struct{}),
-		taskLoopDone:      make(chan struct{}),
-		startedCh:         startedCtx.Done(),
-		startedFn:         startedFn,
-		portMin:           config.PortMin,
-		portMax:           config.PortMax,
-		loggerFactory:     loggerFactory,
-		log:               log,
-		net:               config.Net,
-		proxyDialer:       config.ProxyDialer,
-		tcpMux:            config.TCPMux,
-		udpMux:            config.UDPMux,
-		udpMuxSrflx:       config.UDPMuxSrflx,
+		tieBreaker:       globalMathRandomGenerator.Uint64(),
+		lite:             config.Lite,
+		gatheringState:   GatheringStateNew,
+		connectionState:  ConnectionStateNew,
+		localCandidates:  make(map[NetworkType][]Candidate),
+		remoteCandidates: make(map[NetworkType][]Candidate),
+		urls:             config.Urls,
+		networkTypes:     config.NetworkTypes,
+		onConnected:      make(chan struct{}),
+		buf:              packetio.NewBuffer(),
+		startedCh:        startedCtx.Done(),
+		startedFn:        startedFn,
+		portMin:          config.PortMin,
+		portMax:          config.PortMax,
+		loggerFactory:    loggerFactory,
+		log:              log,
+		net:              config.Net,
+		proxyDialer:      config.ProxyDialer,
+		tcpMux:           config.TCPMux,
+		udpMux:           config.UDPMux,
+		udpMuxSrflx:      config.UDPMuxSrflx,
 
 		mDNSMode: mDNSMode,
 		mDNSName: mDNSName,
@@ -325,6 +216,9 @@ func NewAgent(config *AgentConfig) (*Agent, error) { //nolint:gocognit
 
 		disableActiveTCP: config.DisableActiveTCP,
 	}
+	a.connectionStateNotifier = &handlerNotifier{connectionStateFunc: a.onConnectionStateChange}
+	a.candidateNotifier = &handlerNotifier{candidateFunc: a.onCandidate}
+	a.selectedCandidatePairNotifier = &handlerNotifier{candidatePairFunc: a.onSelectedCandidatePairChange}
 
 	if a.net == nil {
 		a.net, err = stdnet.NewNet()
@@ -338,9 +232,22 @@ func NewAgent(config *AgentConfig) (*Agent, error) { //nolint:gocognit
 		}
 	}
 
+	localIfcs, _, err := localInterfaces(a.net, a.interfaceFilter, a.ipFilter, a.networkTypes, a.includeLoopback)
+	if err != nil {
+		return nil, fmt.Errorf("error getting local interfaces: %w", err)
+	}
+
 	// Opportunistic mDNS: If we can't open the connection, that's ok: we
 	// can continue without it.
-	if a.mDNSConn, a.mDNSMode, err = createMulticastDNS(a.net, mDNSMode, mDNSName, log); err != nil {
+	if a.mDNSConn, a.mDNSMode, err = createMulticastDNS(
+		a.net,
+		a.networkTypes,
+		localIfcs,
+		a.includeLoopback,
+		mDNSMode,
+		mDNSName,
+		log,
+	); err != nil {
 		log.Warnf("Failed to initialize mDNS %s: %v", mDNSName, err)
 	}
 
@@ -366,14 +273,23 @@ func NewAgent(config *AgentConfig) (*Agent, error) { //nolint:gocognit
 		return nil, err
 	}
 
-	go a.taskLoop()
+	a.loop = taskloop.New(func() {
+		a.removeUfragFromMux()
+		a.deleteAllCandidates()
+		a.startedFn()
 
-	// CandidatePair and ConnectionState are usually changed at once.
-	// Blocking one by the other one causes deadlock.
-	// Hence, we call handlers from independent Goroutines.
-	go a.candidatePairRoutine()
-	go a.connectionStateRoutine()
-	go a.candidateRoutine()
+		if err := a.buf.Close(); err != nil {
+			a.log.Warnf("Failed to close buffer: %v", err)
+		}
+
+		a.closeMulticastConn()
+		a.updateConnectionState(ConnectionStateClosed)
+
+		a.gatherCandidateCancel()
+		if a.gatherCandidateDone != nil {
+			<-a.gatherCandidateDone
+		}
+	})
 
 	// Restart is also used to initialize the agent for the first time
 	if err := a.Restart(config.LocalUfrag, config.LocalPwd); err != nil {
@@ -399,10 +315,10 @@ func (a *Agent) startConnectivityChecks(isControlling bool, remoteUfrag, remoteP
 
 	a.log.Debugf("Started agent: isControlling? %t, remoteUfrag: %q, remotePwd: %q", isControlling, remoteUfrag, remotePwd)
 
-	return a.run(a.context(), func(ctx context.Context, agent *Agent) {
-		agent.isControlling = isControlling
-		agent.remoteUfrag = remoteUfrag
-		agent.remotePwd = remotePwd
+	return a.loop.Run(a.loop, func(_ context.Context) {
+		a.isControlling = isControlling
+		a.remoteUfrag = remoteUfrag
+		a.remotePwd = remotePwd
 
 		if isControlling {
 			a.selector = &controllingSelector{agent: a, log: a.log}
@@ -417,7 +333,7 @@ func (a *Agent) startConnectivityChecks(isControlling bool, remoteUfrag, remoteP
 		a.selector.Start()
 		a.startedFn()
 
-		agent.updateConnectionState(ConnectionStateChecking)
+		a.updateConnectionState(ConnectionStateChecking)
 
 		a.requestConnectivityCheck()
 		go a.connectivityChecks() //nolint:contextcheck
@@ -429,7 +345,7 @@ func (a *Agent) connectivityChecks() {
 	checkingDuration := time.Time{}
 
 	contact := func() {
-		if err := a.run(a.context(), func(ctx context.Context, a *Agent) {
+		if err := a.loop.Run(a.loop, func(_ context.Context) {
 			defer func() {
 				lastConnectionState = a.connectionState
 			}()
@@ -486,7 +402,7 @@ func (a *Agent) connectivityChecks() {
 			contact()
 		case <-t.C:
 			contact()
-		case <-a.done:
+		case <-a.loop.Done():
 			t.Stop()
 			return
 		}
@@ -506,12 +422,7 @@ func (a *Agent) updateConnectionState(newState ConnectionState) {
 
 		a.log.Infof("Setting new connection state: %s", newState)
 		a.connectionState = newState
-
-		// Call handler after finishing current task since we may be holding the agent lock
-		// and the handler may also require it
-		a.afterRun(func(ctx context.Context) {
-			a.chanState <- newState
-		})
+		a.connectionStateNotifier.EnqueueConnectionState(newState)
 	}
 }
 
@@ -530,12 +441,7 @@ func (a *Agent) setSelectedPair(p *CandidatePair) {
 	a.updateConnectionState(ConnectionStateConnected)
 
 	// Notify when the selected pair changes
-	a.afterRun(func(ctx context.Context) {
-		select {
-		case a.chanCandidatePair <- p:
-		case <-ctx.Done():
-		}
-	})
+	a.selectedCandidatePairNotifier.EnqueueSelectedCandidatePair(p)
 
 	// Signal connected
 	a.onConnectedOnce.Do(func() { close(a.onConnected) })
@@ -688,9 +594,9 @@ func (a *Agent) AddRemoteCandidate(c Candidate) error {
 	}
 
 	go func() {
-		if err := a.run(a.context(), func(ctx context.Context, agent *Agent) {
+		if err := a.loop.Run(a.loop, func(_ context.Context) {
 			// nolint: contextcheck
-			agent.addRemoteCandidate(c)
+			a.addRemoteCandidate(c)
 		}); err != nil {
 			a.log.Warnf("Failed to add remote candidate %s: %v", c.Address(), err)
 			return
@@ -703,26 +609,21 @@ func (a *Agent) resolveAndAddMulticastCandidate(c *CandidateHost) {
 	if a.mDNSConn == nil {
 		return
 	}
-	_, src, err := a.mDNSConn.Query(c.context(), c.Address())
+
+	_, src, err := a.mDNSConn.QueryAddr(c.context(), c.Address())
 	if err != nil {
 		a.log.Warnf("Failed to discover mDNS candidate %s: %v", c.Address(), err)
 		return
 	}
 
-	ip, ipOk := parseMulticastAnswerAddr(src)
-	if !ipOk {
-		a.log.Warnf("Failed to discover mDNS candidate %s: failed to parse IP", c.Address())
-		return
-	}
-
-	if err = c.setIP(ip); err != nil {
+	if err = c.setIPAddr(src); err != nil {
 		a.log.Warnf("Failed to discover mDNS candidate %s: %v", c.Address(), err)
 		return
 	}
 
-	if err = a.run(a.context(), func(ctx context.Context, agent *Agent) {
+	if err = a.loop.Run(a.loop, func(_ context.Context) {
 		// nolint: contextcheck
-		agent.addRemoteCandidate(c)
+		a.addRemoteCandidate(c)
 	}); err != nil {
 		a.log.Warnf("Failed to add mDNS candidate %s: %v", c.Address(), err)
 		return
@@ -737,17 +638,23 @@ func (a *Agent) requestConnectivityCheck() {
 }
 
 func (a *Agent) addRemotePassiveTCPCandidate(remoteCandidate Candidate) {
-	localIPs, err := localInterfaces(a.net, a.interfaceFilter, a.ipFilter, []NetworkType{remoteCandidate.NetworkType()}, a.includeLoopback)
+	_, localIPs, err := localInterfaces(a.net, a.interfaceFilter, a.ipFilter, []NetworkType{remoteCandidate.NetworkType()}, a.includeLoopback)
 	if err != nil {
 		a.log.Warnf("Failed to iterate local interfaces, host candidates will not be gathered %s", err)
 		return
 	}
 
 	for i := range localIPs {
+		ip, _, _, err := parseAddr(remoteCandidate.addr())
+		if err != nil {
+			a.log.Warnf("Failed to parse address: %s; error: %s", remoteCandidate.addr(), err)
+			continue
+		}
+
 		conn := newActiveTCPConn(
-			a.context(),
+			a.loop,
 			net.JoinHostPort(localIPs[i].String(), "0"),
-			net.JoinHostPort(remoteCandidate.Address(), strconv.Itoa(remoteCandidate.Port())),
+			netip.AddrPortFrom(ip, uint16(remoteCandidate.Port())),
 			a.log,
 		)
 
@@ -771,7 +678,7 @@ func (a *Agent) addRemotePassiveTCPCandidate(remoteCandidate Candidate) {
 
 		localCandidate.start(a, conn, a.startedCh)
 		a.localCandidates[localCandidate.NetworkType()] = append(a.localCandidates[localCandidate.NetworkType()], localCandidate)
-		a.chanCandidate <- localCandidate
+		a.candidateNotifier.EnqueueCandidate(localCandidate)
 
 		a.addPair(localCandidate, remoteCandidate)
 	}
@@ -813,7 +720,7 @@ func (a *Agent) addRemoteCandidate(c Candidate) {
 }
 
 func (a *Agent) addCandidate(ctx context.Context, c Candidate, candidateConn net.PacketConn) error {
-	return a.run(ctx, func(ctx context.Context, agent *Agent) {
+	return a.loop.Run(ctx, func(context.Context) {
 		set := a.localCandidates[c.NetworkType()]
 		for _, candidate := range set {
 			if candidate.Equal(c) {
@@ -841,7 +748,9 @@ func (a *Agent) addCandidate(ctx context.Context, c Candidate, candidateConn net
 
 		a.requestConnectivityCheck()
 
-		a.chanCandidate <- c
+		if !c.filterForLocationTracking() {
+			a.candidateNotifier.EnqueueCandidate(c)
+		}
 	})
 }
 
@@ -849,9 +758,9 @@ func (a *Agent) addCandidate(ctx context.Context, c Candidate, candidateConn net
 func (a *Agent) GetRemoteCandidates() ([]Candidate, error) {
 	var res []Candidate
 
-	err := a.run(a.context(), func(ctx context.Context, agent *Agent) {
+	err := a.loop.Run(a.loop, func(_ context.Context) {
 		var candidates []Candidate
-		for _, set := range agent.remoteCandidates {
+		for _, set := range a.remoteCandidates {
 			candidates = append(candidates, set...)
 		}
 		res = candidates
@@ -867,10 +776,15 @@ func (a *Agent) GetRemoteCandidates() ([]Candidate, error) {
 func (a *Agent) GetLocalCandidates() ([]Candidate, error) {
 	var res []Candidate
 
-	err := a.run(a.context(), func(ctx context.Context, agent *Agent) {
+	err := a.loop.Run(a.loop, func(_ context.Context) {
 		var candidates []Candidate
-		for _, set := range agent.localCandidates {
-			candidates = append(candidates, set...)
+		for _, set := range a.localCandidates {
+			for _, c := range set {
+				if c.filterForLocationTracking() {
+					continue
+				}
+				candidates = append(candidates, c)
+			}
 		}
 		res = candidates
 	})
@@ -884,9 +798,9 @@ func (a *Agent) GetLocalCandidates() ([]Candidate, error) {
 // GetLocalUserCredentials returns the local user credentials
 func (a *Agent) GetLocalUserCredentials() (frag string, pwd string, err error) {
 	valSet := make(chan struct{})
-	err = a.run(a.context(), func(ctx context.Context, agent *Agent) {
-		frag = agent.localUfrag
-		pwd = agent.localPwd
+	err = a.loop.Run(a.loop, func(_ context.Context) {
+		frag = a.localUfrag
+		pwd = a.localPwd
 		close(valSet)
 	})
 
@@ -899,9 +813,9 @@ func (a *Agent) GetLocalUserCredentials() (frag string, pwd string, err error) {
 // GetRemoteUserCredentials returns the remote user credentials
 func (a *Agent) GetRemoteUserCredentials() (frag string, pwd string, err error) {
 	valSet := make(chan struct{})
-	err = a.run(a.context(), func(ctx context.Context, agent *Agent) {
-		frag = agent.remoteUfrag
-		pwd = agent.remotePwd
+	err = a.loop.Run(a.loop, func(_ context.Context) {
+		frag = a.remoteUfrag
+		pwd = a.remotePwd
 		close(valSet)
 	})
 
@@ -925,23 +839,7 @@ func (a *Agent) removeUfragFromMux() {
 
 // Close cleans up the Agent
 func (a *Agent) Close() error {
-	if err := a.ok(); err != nil {
-		return err
-	}
-
-	a.afterRun(func(context.Context) {
-		a.gatherCandidateCancel()
-		if a.gatherCandidateDone != nil {
-			<-a.gatherCandidateDone
-		}
-	})
-	a.err.Store(ErrClosed)
-
-	a.removeUfragFromMux()
-
-	close(a.done)
-	<-a.taskLoopDone
-	return nil
+	return a.loop.Close()
 }
 
 // Remove all candidates. This closes any listening sockets
@@ -968,9 +866,9 @@ func (a *Agent) deleteAllCandidates() {
 }
 
 func (a *Agent) findRemoteCandidate(networkType NetworkType, addr net.Addr) Candidate {
-	ip, port, _, ok := parseAddr(addr)
-	if !ok {
-		a.log.Warnf("Failed to parse address: %s", addr)
+	ip, port, _, err := parseAddr(addr)
+	if err != nil {
+		a.log.Warnf("Failed to parse address: %s; error: %s", addr, err)
 		return nil
 	}
 
@@ -1000,15 +898,15 @@ func (a *Agent) sendBindingRequest(m *stun.Message, local, remote Candidate) {
 func (a *Agent) sendBindingSuccess(m *stun.Message, local, remote Candidate) {
 	base := remote
 
-	ip, port, _, ok := parseAddr(base.addr())
-	if !ok {
-		a.log.Warnf("Failed to parse address: %s", base.addr())
+	ip, port, _, err := parseAddr(base.addr())
+	if err != nil {
+		a.log.Warnf("Failed to parse address: %s; error: %s", base.addr(), err)
 		return
 	}
 
 	if out, err := stun.Build(m, stun.BindingSuccess,
 		&stun.XORMappedAddress{
-			IP:   ip,
+			IP:   ip.AsSlice(),
 			Port: port,
 		},
 		stun.NewShortTermIntegrity(a.localPwd),
@@ -1110,9 +1008,9 @@ func (a *Agent) handleInbound(m *stun.Message, local Candidate, remote net.Addr)
 		}
 
 		if remoteCandidate == nil {
-			ip, port, networkType, ok := parseAddr(remote)
-			if !ok {
-				a.log.Errorf("Failed to create parse remote net.Addr when creating remote prflx candidate")
+			ip, port, networkType, err := parseAddr(remote)
+			if err != nil {
+				a.log.Errorf("Failed to create parse remote net.Addr when creating remote prflx candidate: %s", err)
 				return
 			}
 
@@ -1148,7 +1046,7 @@ func (a *Agent) handleInbound(m *stun.Message, local Candidate, remote net.Addr)
 // and returns true if it is an actual remote candidate
 func (a *Agent) validateNonSTUNTraffic(local Candidate, remote net.Addr) (Candidate, bool) {
 	var remoteCandidate Candidate
-	if err := a.run(local.context(), func(ctx context.Context, agent *Agent) {
+	if err := a.loop.Run(local.context(), func(context.Context) {
 		remoteCandidate = a.findRemoteCandidate(local.NetworkType(), remote)
 		if remoteCandidate != nil {
 			remoteCandidate.seen(false)
@@ -1205,9 +1103,9 @@ func (a *Agent) SetRemoteCredentials(remoteUfrag, remotePwd string) error {
 		return ErrRemotePwdEmpty
 	}
 
-	return a.run(a.context(), func(ctx context.Context, agent *Agent) {
-		agent.remoteUfrag = remoteUfrag
-		agent.remotePwd = remotePwd
+	return a.loop.Run(a.loop, func(_ context.Context) {
+		a.remoteUfrag = remoteUfrag
+		a.remotePwd = remotePwd
 	})
 }
 
@@ -1242,17 +1140,17 @@ func (a *Agent) Restart(ufrag, pwd string) error {
 	}
 
 	var err error
-	if runErr := a.run(a.context(), func(ctx context.Context, agent *Agent) {
-		if agent.gatheringState == GatheringStateGathering {
-			agent.gatherCandidateCancel()
+	if runErr := a.loop.Run(a.loop, func(_ context.Context) {
+		if a.gatheringState == GatheringStateGathering {
+			a.gatherCandidateCancel()
 		}
 
 		// Clear all agent needed to take back to fresh state
 		a.removeUfragFromMux()
-		agent.localUfrag = ufrag
-		agent.localPwd = pwd
-		agent.remoteUfrag = ""
-		agent.remotePwd = ""
+		a.localUfrag = ufrag
+		a.localPwd = pwd
+		a.remoteUfrag = ""
+		a.remotePwd = ""
 		a.gatheringState = GatheringStateNew
 		a.checklist = make([]*CandidatePair, 0)
 		a.pendingBindingRequests = make([]bindingRequest, 0)
@@ -1275,9 +1173,9 @@ func (a *Agent) Restart(ufrag, pwd string) error {
 
 func (a *Agent) setGatheringState(newState GatheringState) error {
 	done := make(chan struct{})
-	if err := a.run(a.context(), func(ctx context.Context, agent *Agent) {
+	if err := a.loop.Run(a.loop, func(context.Context) {
 		if a.gatheringState != newState && newState == GatheringStateComplete {
-			a.chanCandidate <- nil
+			a.candidateNotifier.EnqueueCandidate(nil)
 		}
 
 		a.gatheringState = newState

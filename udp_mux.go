@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
@@ -36,7 +37,7 @@ type UDPMuxDefault struct {
 	connsIPv4, connsIPv6 map[string]*udpMuxedConn
 
 	addressMapMu sync.RWMutex
-	addressMap   map[string]*udpMuxedConn
+	addressMap   map[ipPort]*udpMuxedConn
 
 	// Buffer pool to recycle buffers for net.UDPAddr encodes/decodes
 	pool *sync.Pool
@@ -51,8 +52,9 @@ const maxAddrSize = 512
 
 // UDPMuxParams are parameters for UDPMux.
 type UDPMuxParams struct {
-	Logger  logging.LeveledLogger
-	UDPConn net.PacketConn
+	Logger        logging.LeveledLogger
+	UDPConn       net.PacketConn
+	UDPConnString string
 
 	// Required for gathering local addresses
 	// in case a un UDPConn is passed which does not
@@ -67,19 +69,19 @@ func NewUDPMuxDefault(params UDPMuxParams) *UDPMuxDefault {
 	}
 
 	var localAddrsForUnspecified []net.Addr
-	if addr, ok := params.UDPConn.LocalAddr().(*net.UDPAddr); !ok {
+	if udpAddr, ok := params.UDPConn.LocalAddr().(*net.UDPAddr); !ok {
 		params.Logger.Errorf("LocalAddr is not a net.UDPAddr, got %T", params.UDPConn.LocalAddr())
-	} else if ok && addr.IP.IsUnspecified() {
+	} else if ok && udpAddr.IP.IsUnspecified() {
 		// For unspecified addresses, the correct behavior is to return errListenUnspecified, but
 		// it will break the applications that are already using unspecified UDP connection
 		// with UDPMuxDefault, so print a warn log and create a local address list for mux.
 		params.Logger.Warn("UDPMuxDefault should not listening on unspecified address, use NewMultiUDPMuxFromPort instead")
 		var networks []NetworkType
 		switch {
-		case addr.IP.To4() != nil:
+		case udpAddr.IP.To4() != nil:
 			networks = []NetworkType{NetworkTypeUDP4}
 
-		case addr.IP.To16() != nil:
+		case udpAddr.IP.To16() != nil:
 			networks = []NetworkType{NetworkTypeUDP4, NetworkTypeUDP6}
 
 		default:
@@ -93,19 +95,24 @@ func NewUDPMuxDefault(params UDPMuxParams) *UDPMuxDefault {
 				}
 			}
 
-			ips, err := localInterfaces(params.Net, nil, nil, networks, true)
+			_, addrs, err := localInterfaces(params.Net, nil, nil, networks, true)
 			if err == nil {
-				for _, ip := range ips {
-					localAddrsForUnspecified = append(localAddrsForUnspecified, &net.UDPAddr{IP: ip, Port: addr.Port})
+				for _, addr := range addrs {
+					localAddrsForUnspecified = append(localAddrsForUnspecified, &net.UDPAddr{
+						IP:   addr.AsSlice(),
+						Port: udpAddr.Port,
+						Zone: addr.Zone(),
+					})
 				}
 			} else {
 				params.Logger.Errorf("Failed to get local interfaces for unspecified addr: %v", err)
 			}
 		}
 	}
+	params.UDPConnString = params.UDPConn.LocalAddr().String()
 
 	m := &UDPMuxDefault{
-		addressMap: map[string]*udpMuxedConn{},
+		addressMap: map[ipPort]*udpMuxedConn{},
 		params:     params,
 		connsIPv4:  make(map[string]*udpMuxedConn),
 		connsIPv6:  make(map[string]*udpMuxedConn),
@@ -142,7 +149,7 @@ func (m *UDPMuxDefault) GetListenAddresses() []net.Addr {
 // creates the connection if an existing one can't be found
 func (m *UDPMuxDefault) GetConn(ufrag string, addr net.Addr) (net.PacketConn, error) {
 	// don't check addr for mux using unspecified address
-	if len(m.localAddrsForUnspecified) == 0 && m.params.UDPConn.LocalAddr().String() != addr.String() {
+	if len(m.localAddrsForUnspecified) == 0 && m.params.UDPConnString != addr.String() {
 		return nil, errInvalidAddress
 	}
 
@@ -246,7 +253,7 @@ func (m *UDPMuxDefault) writeTo(buf []byte, rAddr net.Addr) (n int, err error) {
 	return m.params.UDPConn.WriteTo(buf, rAddr)
 }
 
-func (m *UDPMuxDefault) registerConnForAddress(conn *udpMuxedConn, addr string) {
+func (m *UDPMuxDefault) registerConnForAddress(conn *udpMuxedConn, addr ipPort) {
 	if m.IsClosed() {
 		return
 	}
@@ -260,7 +267,7 @@ func (m *UDPMuxDefault) registerConnForAddress(conn *udpMuxedConn, addr string) 
 	}
 	m.addressMap[addr] = conn
 
-	m.params.Logger.Debugf("Registered %s for %s", addr, conn.params.Key)
+	m.params.Logger.Debugf("Registered %s for %s", addr.addr.String(), conn.params.Key)
 }
 
 func (m *UDPMuxDefault) createMuxedConn(key string) *udpMuxedConn {
@@ -296,15 +303,20 @@ func (m *UDPMuxDefault) connWorker() {
 			return
 		}
 
-		udpAddr, ok := addr.(*net.UDPAddr)
+		netUDPAddr, ok := addr.(*net.UDPAddr)
 		if !ok {
 			logger.Errorf("Underlying PacketConn did not return a UDPAddr")
+			return
+		}
+		udpAddr, err := newIPPort(netUDPAddr.IP, netUDPAddr.Zone, uint16(netUDPAddr.Port))
+		if err != nil {
+			logger.Errorf("Failed to create a new IP/Port host pair")
 			return
 		}
 
 		// If we have already seen this address dispatch to the appropriate destination
 		m.addressMapMu.Lock()
-		destinationConn := m.addressMap[addr.String()]
+		destinationConn := m.addressMap[udpAddr]
 		m.addressMapMu.Unlock()
 
 		// If we haven't seen this address before but is a STUN packet lookup by ufrag
@@ -325,7 +337,7 @@ func (m *UDPMuxDefault) connWorker() {
 			}
 
 			ufrag := strings.Split(string(attr), ":")[0]
-			isIPv6 := udpAddr.IP.To4() == nil
+			isIPv6 := netUDPAddr.IP.To4() == nil
 
 			m.mu.Lock()
 			destinationConn, _ = m.getConn(ufrag, isIPv6)
@@ -333,11 +345,11 @@ func (m *UDPMuxDefault) connWorker() {
 		}
 
 		if destinationConn == nil {
-			m.params.Logger.Tracef("Dropping packet from %s, addr: %s", udpAddr.String(), addr.String())
+			m.params.Logger.Tracef("Dropping packet from %s, addr: %s", udpAddr.addr.String(), addr.String())
 			continue
 		}
 
-		if err = destinationConn.writePacket(buf[:n], udpAddr); err != nil {
+		if err = destinationConn.writePacket(buf[:n], netUDPAddr); err != nil {
 			m.params.Logger.Errorf("Failed to write packet: %v", err)
 		}
 	}
@@ -360,4 +372,24 @@ func newBufferHolder(size int) *bufferHolder {
 	return &bufferHolder{
 		buf: make([]byte, size),
 	}
+}
+
+type ipPort struct {
+	addr netip.Addr
+	port uint16
+}
+
+// newIPPort create a custom type of address based on netip.Addr and
+// port. The underlying ip address passed is converted to IPv6 format
+// to simplify ip address handling
+func newIPPort(ip net.IP, zone string, port uint16) (ipPort, error) {
+	n, ok := netip.AddrFromSlice(ip.To16())
+	if !ok {
+		return ipPort{}, errInvalidIPAddress
+	}
+
+	return ipPort{
+		addr: n.WithZone(zone),
+		port: port,
+	}, nil
 }

@@ -17,32 +17,30 @@ import (
 	"github.com/pion/stun/v2"
 	"github.com/pion/transport/v3/test"
 	"github.com/pion/transport/v3/vnet"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestVNetGather(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
 	t.Run("No local IP address", func(t *testing.T) {
 		n, err := vnet.NewNet(&vnet.NetConfig{})
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		a, err := NewAgent(&AgentConfig{
 			Net: n,
 		})
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
-		localIPs, err := localInterfaces(a.net, a.interfaceFilter, a.ipFilter, []NetworkType{NetworkTypeUDP4}, false)
+		_, localIPs, err := localInterfaces(a.net, a.interfaceFilter, a.ipFilter, []NetworkType{NetworkTypeUDP4}, false)
 		if len(localIPs) > 0 {
 			t.Fatal("should return no local IP")
-		} else if err != nil {
-			t.Fatal(err)
 		}
+		require.NoError(t, err)
 
-		assert.NoError(t, a.Close())
+		require.NoError(t, a.Close())
 	})
 
 	t.Run("Gather a dynamic IP address", func(t *testing.T) {
@@ -73,25 +71,24 @@ func TestVNetGather(t *testing.T) {
 		a, err := NewAgent(&AgentConfig{
 			Net: nw,
 		})
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
-		localIPs, err := localInterfaces(a.net, a.interfaceFilter, a.ipFilter, []NetworkType{NetworkTypeUDP4}, false)
-		if len(localIPs) == 0 {
+		_, localAddrs, err := localInterfaces(a.net, a.interfaceFilter, a.ipFilter, []NetworkType{NetworkTypeUDP4}, false)
+		if len(localAddrs) == 0 {
 			t.Fatal("should have one local IP")
-		} else if err != nil {
-			t.Fatal(err)
 		}
+		require.NoError(t, err)
 
-		for _, ip := range localIPs {
-			if ip.IsLoopback() {
+		for _, addr := range localAddrs {
+			if addr.IsLoopback() {
 				t.Fatal("should not return loopback IP")
 			}
-			if !ipNet.Contains(ip) {
+			if !ipNet.Contains(addr.AsSlice()) {
 				t.Fatal("should be contained in the CIDR")
 			}
 		}
 
-		assert.NoError(t, a.Close())
+		require.NoError(t, a.Close())
 	})
 
 	t.Run("listenUDP", func(t *testing.T) {
@@ -118,14 +115,13 @@ func TestVNetGather(t *testing.T) {
 			t.Fatalf("Failed to create agent: %s", err)
 		}
 
-		localIPs, err := localInterfaces(a.net, a.interfaceFilter, a.ipFilter, []NetworkType{NetworkTypeUDP4}, false)
-		if len(localIPs) == 0 {
+		_, localAddrs, err := localInterfaces(a.net, a.interfaceFilter, a.ipFilter, []NetworkType{NetworkTypeUDP4}, false)
+		if len(localAddrs) == 0 {
 			t.Fatal("localInterfaces found no interfaces, unable to test")
-		} else if err != nil {
-			t.Fatal(err)
 		}
+		require.NoError(t, err)
 
-		ip := localIPs[0]
+		ip := localAddrs[0].AsSlice()
 
 		conn, err := listenUDPInPortRange(a.net, a.log, 0, 0, udp, &net.UDPAddr{IP: ip, Port: 0})
 		if err != nil {
@@ -151,20 +147,19 @@ func TestVNetGather(t *testing.T) {
 		}
 
 		_, port, err := net.SplitHostPort(conn.LocalAddr().String())
-		if err != nil {
-			t.Fatal(err)
-		} else if port != "5000" {
+
+		require.NoError(t, err)
+		if port != "5000" {
 			t.Fatalf("listenUDP with port restriction of 5000 listened on incorrect port (%s)", port)
 		}
 
-		assert.NoError(t, conn.Close())
-		assert.NoError(t, a.Close())
+		require.NoError(t, conn.Close())
+		require.NoError(t, a.Close())
 	})
 }
 
 func TestVNetGatherWithNAT1To1(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	loggerFactory := logging.NewDefaultLoggerFactory()
 	log := loggerFactory.NewLogger("test")
@@ -181,7 +176,7 @@ func TestVNetGatherWithNAT1To1(t *testing.T) {
 			CIDR:          "1.2.3.0/24",
 			LoggerFactory: loggerFactory,
 		})
-		assert.NoError(t, err, "should succeed")
+		require.NoError(t, err, "should succeed")
 
 		lan, err := vnet.NewRouter(&vnet.RouterConfig{
 			CIDR:      "10.0.0.0/24",
@@ -191,10 +186,10 @@ func TestVNetGatherWithNAT1To1(t *testing.T) {
 			},
 			LoggerFactory: loggerFactory,
 		})
-		assert.NoError(t, err, "should succeed")
+		require.NoError(t, err, "should succeed")
 
 		err = wan.AddRouter(lan)
-		assert.NoError(t, err, "should succeed")
+		require.NoError(t, err, "should succeed")
 
 		nw, err := vnet.NewNet(&vnet.NetConfig{
 			StaticIPs: []string{localIP0, localIP1},
@@ -204,7 +199,7 @@ func TestVNetGatherWithNAT1To1(t *testing.T) {
 		}
 
 		err = lan.AddNet(nw)
-		assert.NoError(t, err, "should succeed")
+		require.NoError(t, err, "should succeed")
 
 		a, err := NewAgent(&AgentConfig{
 			NetworkTypes: []NetworkType{
@@ -213,7 +208,7 @@ func TestVNetGatherWithNAT1To1(t *testing.T) {
 			NAT1To1IPs: []string{map0, map1},
 			Net:        nw,
 		})
-		assert.NoError(t, err, "should succeed")
+		require.NoError(t, err, "should succeed")
 		defer a.Close() //nolint:errcheck
 
 		done := make(chan struct{})
@@ -222,17 +217,17 @@ func TestVNetGatherWithNAT1To1(t *testing.T) {
 				close(done)
 			}
 		})
-		assert.NoError(t, err, "should succeed")
+		require.NoError(t, err, "should succeed")
 
 		err = a.GatherCandidates()
-		assert.NoError(t, err, "should succeed")
+		require.NoError(t, err, "should succeed")
 
 		log.Debug("Wait until gathering is complete...")
 		<-done
 		log.Debug("Gathering is done")
 
 		candidates, err := a.GetLocalCandidates()
-		assert.NoError(t, err, "should succeed")
+		require.NoError(t, err, "should succeed")
 
 		if len(candidates) != 2 {
 			t.Fatal("There must be two candidates")
@@ -274,7 +269,7 @@ func TestVNetGatherWithNAT1To1(t *testing.T) {
 			CIDR:          "1.2.3.0/24",
 			LoggerFactory: loggerFactory,
 		})
-		assert.NoError(t, err, "should succeed")
+		require.NoError(t, err, "should succeed")
 
 		lan, err := vnet.NewRouter(&vnet.RouterConfig{
 			CIDR: "10.0.0.0/24",
@@ -286,10 +281,10 @@ func TestVNetGatherWithNAT1To1(t *testing.T) {
 			},
 			LoggerFactory: loggerFactory,
 		})
-		assert.NoError(t, err, "should succeed")
+		require.NoError(t, err, "should succeed")
 
 		err = wan.AddRouter(lan)
-		assert.NoError(t, err, "should succeed")
+		require.NoError(t, err, "should succeed")
 
 		nw, err := vnet.NewNet(&vnet.NetConfig{
 			StaticIPs: []string{
@@ -301,7 +296,7 @@ func TestVNetGatherWithNAT1To1(t *testing.T) {
 		}
 
 		err = lan.AddNet(nw)
-		assert.NoError(t, err, "should succeed")
+		require.NoError(t, err, "should succeed")
 
 		a, err := NewAgent(&AgentConfig{
 			NetworkTypes: []NetworkType{
@@ -313,7 +308,7 @@ func TestVNetGatherWithNAT1To1(t *testing.T) {
 			NAT1To1IPCandidateType: CandidateTypeServerReflexive,
 			Net:                    nw,
 		})
-		assert.NoError(t, err, "should succeed")
+		require.NoError(t, err, "should succeed")
 		defer a.Close() //nolint:errcheck
 
 		done := make(chan struct{})
@@ -322,17 +317,17 @@ func TestVNetGatherWithNAT1To1(t *testing.T) {
 				close(done)
 			}
 		})
-		assert.NoError(t, err, "should succeed")
+		require.NoError(t, err, "should succeed")
 
 		err = a.GatherCandidates()
-		assert.NoError(t, err, "should succeed")
+		require.NoError(t, err, "should succeed")
 
 		log.Debug("Wait until gathering is complete...")
 		<-done
 		log.Debug("Gathering is done")
 
 		candidates, err := a.GetLocalCandidates()
-		assert.NoError(t, err, "should succeed")
+		require.NoError(t, err, "should succeed")
 
 		if len(candidates) != 2 {
 			t.Fatalf("Expected two candidates. actually %d", len(candidates))
@@ -352,16 +347,15 @@ func TestVNetGatherWithNAT1To1(t *testing.T) {
 			}
 		}
 
-		assert.NotNil(t, candiHost, "should not be nil")
-		assert.Equal(t, "10.0.0.1", candiHost.Address(), "should match")
-		assert.NotNil(t, candiSrflx, "should not be nil")
-		assert.Equal(t, "1.2.3.4", candiSrflx.Address(), "should match")
+		require.NotNil(t, candiHost, "should not be nil")
+		require.Equal(t, "10.0.0.1", candiHost.Address(), "should match")
+		require.NotNil(t, candiSrflx, "should not be nil")
+		require.Equal(t, "1.2.3.4", candiSrflx.Address(), "should match")
 	})
 }
 
 func TestVNetGatherWithInterfaceFilter(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	loggerFactory := logging.NewDefaultLoggerFactory()
 	r, err := vnet.NewRouter(&vnet.RouterConfig{
@@ -385,66 +379,65 @@ func TestVNetGatherWithInterfaceFilter(t *testing.T) {
 		a, err := NewAgent(&AgentConfig{
 			Net: nw,
 			InterfaceFilter: func(interfaceName string) bool {
-				assert.Equal(t, "eth0", interfaceName)
+				require.Equal(t, "eth0", interfaceName)
 				return false
 			},
 		})
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
-		localIPs, err := localInterfaces(a.net, a.interfaceFilter, a.ipFilter, []NetworkType{NetworkTypeUDP4}, false)
-		if err != nil {
-			t.Fatal(err)
-		} else if len(localIPs) != 0 {
+		_, localIPs, err := localInterfaces(a.net, a.interfaceFilter, a.ipFilter, []NetworkType{NetworkTypeUDP4}, false)
+		require.NoError(t, err)
+
+		if len(localIPs) != 0 {
 			t.Fatal("InterfaceFilter should have excluded everything")
 		}
 
-		assert.NoError(t, a.Close())
+		require.NoError(t, a.Close())
 	})
 
 	t.Run("IPFilter should exclude the IP", func(t *testing.T) {
 		a, err := NewAgent(&AgentConfig{
 			Net: nw,
 			IPFilter: func(ip net.IP) bool {
-				assert.Equal(t, net.IP{1, 2, 3, 1}, ip)
+				require.Equal(t, net.IP{1, 2, 3, 1}, ip)
 				return false
 			},
 		})
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
-		localIPs, err := localInterfaces(a.net, a.interfaceFilter, a.ipFilter, []NetworkType{NetworkTypeUDP4}, false)
-		if err != nil {
-			t.Fatal(err)
-		} else if len(localIPs) != 0 {
+		_, localIPs, err := localInterfaces(a.net, a.interfaceFilter, a.ipFilter, []NetworkType{NetworkTypeUDP4}, false)
+		require.NoError(t, err)
+
+		if len(localIPs) != 0 {
 			t.Fatal("IPFilter should have excluded everything")
 		}
 
-		assert.NoError(t, a.Close())
+		require.NoError(t, a.Close())
 	})
 
 	t.Run("InterfaceFilter should not exclude the interface", func(t *testing.T) {
 		a, err := NewAgent(&AgentConfig{
 			Net: nw,
 			InterfaceFilter: func(interfaceName string) bool {
-				assert.Equal(t, "eth0", interfaceName)
+				require.Equal(t, "eth0", interfaceName)
 				return true
 			},
 		})
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
-		localIPs, err := localInterfaces(a.net, a.interfaceFilter, a.ipFilter, []NetworkType{NetworkTypeUDP4}, false)
-		if err != nil {
-			t.Fatal(err)
-		} else if len(localIPs) == 0 {
+		_, localIPs, err := localInterfaces(a.net, a.interfaceFilter, a.ipFilter, []NetworkType{NetworkTypeUDP4}, false)
+		require.NoError(t, err)
+
+		if len(localIPs) == 0 {
 			t.Fatal("InterfaceFilter should not have excluded anything")
 		}
 
-		assert.NoError(t, a.Close())
+		require.NoError(t, a.Close())
 	})
 }
 
 func TestVNetGather_TURNConnectionLeak(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	turnServerURL := &stun.URI{
 		Scheme:   stun.SchemeTypeTURN,
@@ -462,9 +455,7 @@ func TestVNetGather_TURNConnectionLeak(t *testing.T) {
 	}
 	v, err := buildVNet(natType, natType)
 
-	if !assert.NoError(t, err, "should succeed") {
-		return
-	}
+	require.NoError(t, err, "should succeed")
 	defer v.close()
 
 	cfg0 := &AgentConfig{
@@ -477,11 +468,9 @@ func TestVNetGather_TURNConnectionLeak(t *testing.T) {
 		Net:              v.net0,
 	}
 	aAgent, err := NewAgent(cfg0)
-	if !assert.NoError(t, err, "should succeed") {
-		return
-	}
+	require.NoError(t, err, "should succeed")
 
 	aAgent.gatherCandidatesRelay(context.Background(), []*stun.URI{turnServerURL})
 	// Assert relay conn leak on close.
-	assert.NoError(t, aAgent.Close())
+	require.NoError(t, aAgent.Close())
 }

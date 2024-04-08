@@ -19,7 +19,7 @@ import (
 	"github.com/pion/transport/v3/test"
 	"github.com/pion/transport/v3/vnet"
 	"github.com/pion/turn/v3"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -171,7 +171,7 @@ func addVNetSTUN(wanNet *vnet.Net, loggerFactory logging.LoggerFactory) (*turn.S
 		return nil, err
 	}
 	server, err := turn.NewServer(turn.ServerConfig{
-		AuthHandler: func(username, realm string, srcAddr net.Addr) (key []byte, ok bool) {
+		AuthHandler: func(username, realm string, _ net.Addr) (key []byte, ok bool) {
 			if pw, ok := credMap[username]; ok {
 				return turn.GenerateAuthKey(username, realm, pw), true
 			}
@@ -292,18 +292,13 @@ func pipeWithVNet(v *virtualNet, a0TestConfig, a1TestConfig *agentTestConfig) (*
 	return aConn, bConn
 }
 
-func closePipe(t *testing.T, ca *Conn, cb *Conn) bool {
-	err := ca.Close()
-	if !assert.NoError(t, err, "should succeed") {
-		return false
-	}
-	err = cb.Close()
-	return assert.NoError(t, err, "should succeed")
+func closePipe(t *testing.T, ca *Conn, cb *Conn) {
+	require.NoError(t, ca.Close())
+	require.NoError(t, cb.Close())
 }
 
 func TestConnectivityVNet(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	stunServerURL := &stun.URI{
 		Scheme: stun.SchemeTypeSTUN,
@@ -332,9 +327,7 @@ func TestConnectivityVNet(t *testing.T) {
 		}
 		v, err := buildVNet(natType, natType)
 
-		if !assert.NoError(t, err, "should succeed") {
-			return
-		}
+		require.NoError(t, err, "should succeed")
 		defer v.close()
 
 		log.Debug("Connecting...")
@@ -353,9 +346,7 @@ func TestConnectivityVNet(t *testing.T) {
 		time.Sleep(1 * time.Second)
 
 		log.Debug("Closing...")
-		if !closePipe(t, ca, cb) {
-			return
-		}
+		closePipe(t, ca, cb)
 	})
 
 	t.Run("Symmetric NATs on both ends", func(t *testing.T) {
@@ -369,9 +360,7 @@ func TestConnectivityVNet(t *testing.T) {
 		}
 		v, err := buildVNet(natType, natType)
 
-		if !assert.NoError(t, err, "should succeed") {
-			return
-		}
+		require.NoError(t, err, "should succeed")
 		defer v.close()
 
 		log.Debug("Connecting...")
@@ -389,9 +378,7 @@ func TestConnectivityVNet(t *testing.T) {
 		ca, cb := pipeWithVNet(v, a0TestConfig, a1TestConfig)
 
 		log.Debug("Closing...")
-		if !closePipe(t, ca, cb) {
-			return
-		}
+		closePipe(t, ca, cb)
 	})
 
 	t.Run("1:1 NAT with host candidate vs Symmetric NATs", func(t *testing.T) {
@@ -409,9 +396,7 @@ func TestConnectivityVNet(t *testing.T) {
 		}
 		v, err := buildVNet(natType0, natType1)
 
-		if !assert.NoError(t, err, "should succeed") {
-			return
-		}
+		require.NoError(t, err, "should succeed")
 		defer v.close()
 
 		log.Debug("Connecting...")
@@ -425,9 +410,7 @@ func TestConnectivityVNet(t *testing.T) {
 		ca, cb := pipeWithVNet(v, a0TestConfig, a1TestConfig)
 
 		log.Debug("Closing...")
-		if !closePipe(t, ca, cb) {
-			return
-		}
+		closePipe(t, ca, cb)
 	})
 
 	t.Run("1:1 NAT with srflx candidate vs Symmetric NATs", func(t *testing.T) {
@@ -445,9 +428,7 @@ func TestConnectivityVNet(t *testing.T) {
 		}
 		v, err := buildVNet(natType0, natType1)
 
-		if !assert.NoError(t, err, "should succeed") {
-			return
-		}
+		require.NoError(t, err, "should succeed")
 		defer v.close()
 
 		log.Debug("Connecting...")
@@ -461,19 +442,15 @@ func TestConnectivityVNet(t *testing.T) {
 		ca, cb := pipeWithVNet(v, a0TestConfig, a1TestConfig)
 
 		log.Debug("Closing...")
-		if !closePipe(t, ca, cb) {
-			return
-		}
+		closePipe(t, ca, cb)
 	})
 }
 
-// TestDisconnectedToConnected asserts that an agent can go to disconnected, and then return to connected successfully
+// TestDisconnectedToConnected requires that an agent can go to disconnected, and then return to connected successfully
 func TestDisconnectedToConnected(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 10)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 10).Stop()
 
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
@@ -482,7 +459,7 @@ func TestDisconnectedToConnected(t *testing.T) {
 		CIDR:          "0.0.0.0/0",
 		LoggerFactory: loggerFactory,
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	var dropAllData uint64
 	wan.AddChunkFilter(func(vnet.Chunk) bool {
@@ -492,16 +469,16 @@ func TestDisconnectedToConnected(t *testing.T) {
 	net0, err := vnet.NewNet(&vnet.NetConfig{
 		StaticIPs: []string{"192.168.0.1"},
 	})
-	assert.NoError(t, err)
-	assert.NoError(t, wan.AddNet(net0))
+	require.NoError(t, err)
+	require.NoError(t, wan.AddNet(net0))
 
 	net1, err := vnet.NewNet(&vnet.NetConfig{
 		StaticIPs: []string{"192.168.0.2"},
 	})
-	assert.NoError(t, err)
-	assert.NoError(t, wan.AddNet(net1))
+	require.NoError(t, err)
+	require.NoError(t, wan.AddNet(net1))
 
-	assert.NoError(t, wan.Start())
+	require.NoError(t, wan.Start())
 
 	disconnectTimeout := time.Second
 	keepaliveInterval := time.Millisecond * 20
@@ -515,7 +492,7 @@ func TestDisconnectedToConnected(t *testing.T) {
 		KeepaliveInterval:   &keepaliveInterval,
 		CheckInterval:       &keepaliveInterval,
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	controlledAgent, err := NewAgent(&AgentConfig{
 		NetworkTypes:        supportedNetworkTypes(),
@@ -525,15 +502,15 @@ func TestDisconnectedToConnected(t *testing.T) {
 		KeepaliveInterval:   &keepaliveInterval,
 		CheckInterval:       &keepaliveInterval,
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	controllingStateChanges := make(chan ConnectionState, 100)
-	assert.NoError(t, controllingAgent.OnConnectionStateChange(func(c ConnectionState) {
+	require.NoError(t, controllingAgent.OnConnectionStateChange(func(c ConnectionState) {
 		controllingStateChanges <- c
 	}))
 
 	controlledStateChanges := make(chan ConnectionState, 100)
-	assert.NoError(t, controlledAgent.OnConnectionStateChange(func(c ConnectionState) {
+	require.NoError(t, controlledAgent.OnConnectionStateChange(func(c ConnectionState) {
 		controlledStateChanges <- c
 	}))
 
@@ -560,18 +537,16 @@ func TestDisconnectedToConnected(t *testing.T) {
 	blockUntilStateSeen(ConnectionStateConnected, controllingStateChanges)
 	blockUntilStateSeen(ConnectionStateConnected, controlledStateChanges)
 
-	assert.NoError(t, wan.Stop())
-	assert.NoError(t, controllingAgent.Close())
-	assert.NoError(t, controlledAgent.Close())
+	require.NoError(t, wan.Stop())
+	require.NoError(t, controllingAgent.Close())
+	require.NoError(t, controlledAgent.Close())
 }
 
 // Agent.Write should use the best valid pair if a selected pair is not yet available
 func TestWriteUseValidPair(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 10)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 10).Stop()
 
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
@@ -580,7 +555,7 @@ func TestWriteUseValidPair(t *testing.T) {
 		CIDR:          "0.0.0.0/0",
 		LoggerFactory: loggerFactory,
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	wan.AddChunkFilter(func(c vnet.Chunk) bool {
 		if stun.IsMessage(c.UserData()) {
@@ -600,16 +575,16 @@ func TestWriteUseValidPair(t *testing.T) {
 	net0, err := vnet.NewNet(&vnet.NetConfig{
 		StaticIPs: []string{"192.168.0.1"},
 	})
-	assert.NoError(t, err)
-	assert.NoError(t, wan.AddNet(net0))
+	require.NoError(t, err)
+	require.NoError(t, wan.AddNet(net0))
 
 	net1, err := vnet.NewNet(&vnet.NetConfig{
 		StaticIPs: []string{"192.168.0.2"},
 	})
-	assert.NoError(t, err)
-	assert.NoError(t, wan.AddNet(net1))
+	require.NoError(t, err)
+	require.NoError(t, wan.AddNet(net1))
 
-	assert.NoError(t, wan.Start())
+	require.NoError(t, wan.Start())
 
 	// Create two agents and connect them
 	controllingAgent, err := NewAgent(&AgentConfig{
@@ -617,25 +592,25 @@ func TestWriteUseValidPair(t *testing.T) {
 		MulticastDNSMode: MulticastDNSModeDisabled,
 		Net:              net0,
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	controlledAgent, err := NewAgent(&AgentConfig{
 		NetworkTypes:     supportedNetworkTypes(),
 		MulticastDNSMode: MulticastDNSModeDisabled,
 		Net:              net1,
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	gatherAndExchangeCandidates(controllingAgent, controlledAgent)
 
 	controllingUfrag, controllingPwd, err := controllingAgent.GetLocalUserCredentials()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	controlledUfrag, controlledPwd, err := controlledAgent.GetLocalUserCredentials()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	assert.NoError(t, controllingAgent.startConnectivityChecks(true, controlledUfrag, controlledPwd))
-	assert.NoError(t, controlledAgent.startConnectivityChecks(false, controllingUfrag, controllingPwd))
+	require.NoError(t, controllingAgent.startConnectivityChecks(true, controlledUfrag, controlledPwd))
+	require.NoError(t, controlledAgent.startConnectivityChecks(false, controllingUfrag, controllingPwd))
 
 	testMessage := []byte("Test Message")
 	go func() {
@@ -650,11 +625,11 @@ func TestWriteUseValidPair(t *testing.T) {
 
 	readBuf := make([]byte, len(testMessage))
 	_, err = (&Conn{agent: controlledAgent}).Read(readBuf)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	assert.Equal(t, readBuf, testMessage)
+	require.Equal(t, readBuf, testMessage)
 
-	assert.NoError(t, wan.Stop())
-	assert.NoError(t, controllingAgent.Close())
-	assert.NoError(t, controlledAgent.Close())
+	require.NoError(t, wan.Stop())
+	require.NoError(t, controllingAgent.Close())
+	require.NoError(t, controlledAgent.Close())
 }

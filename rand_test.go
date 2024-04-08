@@ -6,6 +6,8 @@ package ice
 import (
 	"sync"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestRandomGeneratorCollision(t *testing.T) {
@@ -15,25 +17,21 @@ func TestRandomGeneratorCollision(t *testing.T) {
 		gen func(t *testing.T) string
 	}{
 		"CandidateID": {
-			gen: func(t *testing.T) string {
+			gen: func(*testing.T) string {
 				return candidateIDGen.Generate()
 			},
 		},
 		"PWD": {
 			gen: func(t *testing.T) string {
 				s, err := generatePwd()
-				if err != nil {
-					t.Fatal(err)
-				}
+				require.NoError(t, err)
 				return s
 			},
 		},
 		"Ufrag": {
 			gen: func(t *testing.T) string {
 				s, err := generateUFrag()
-				if err != nil {
-					t.Fatal(err)
-				}
+				require.NoError(t, err)
 				return s
 			},
 		},

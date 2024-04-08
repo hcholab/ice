@@ -9,22 +9,22 @@ package ice
 import (
 	"context"
 	"net"
+	"net/netip"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/pion/stun/v2"
 	"github.com/pion/transport/v3/test"
+	"github.com/stretchr/testify/require"
 )
 
 func TestStressDuplex(t *testing.T) {
 	// Check for leaking routines
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	// Limit runtime in case of deadlocks
-	lim := test.TimeOut(time.Second * 20)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 20).Stop()
 
 	// Run the test
 	stressDuplex(t)
@@ -49,8 +49,8 @@ func testTimeout(t *testing.T, c *Conn, timeout time.Duration) {
 
 		var cs ConnectionState
 
-		err := c.agent.run(context.Background(), func(ctx context.Context, agent *Agent) {
-			cs = agent.connectionState
+		err := c.agent.loop.Run(context.Background(), func(_ context.Context) {
+			cs = c.agent.connectionState
 		})
 		if err != nil {
 			// We should never get here.
@@ -76,12 +76,10 @@ func TestTimeout(t *testing.T) {
 	}
 
 	// Check for leaking routines
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	// Limit runtime in case of deadlocks
-	lim := test.TimeOut(time.Second * 20)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 20).Stop()
 
 	t.Run("WithoutDisconnectTimeout", func(t *testing.T) {
 		ca, cb := pipe(nil)
@@ -108,12 +106,10 @@ func TestTimeout(t *testing.T) {
 
 func TestReadClosed(t *testing.T) {
 	// Check for leaking routines
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	// Limit runtime in case of deadlocks
-	lim := test.TimeOut(time.Second * 20)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 20).Stop()
 
 	ca, cb := pipe(nil)
 
@@ -140,14 +136,8 @@ func stressDuplex(t *testing.T) {
 	ca, cb := pipe(nil)
 
 	defer func() {
-		err := ca.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		err = cb.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, ca.Close())
+		require.NoError(t, cb.Close())
 	}()
 
 	opt := test.Options{
@@ -155,10 +145,7 @@ func stressDuplex(t *testing.T) {
 		MsgCount: 1, // Order not reliable due to UDP & potentially multiple candidate pairs.
 	}
 
-	err := test.StressDuplex(ca, cb, opt)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, test.StressDuplex(ca, cb, opt))
 }
 
 func check(err error) {
@@ -189,13 +176,20 @@ func gatherAndExchangeCandidates(aAgent, bAgent *Agent) {
 
 	candidates, err := aAgent.GetLocalCandidates()
 	check(err)
+
 	for _, c := range candidates {
+		if addr, parseErr := netip.ParseAddr(c.Address()); parseErr == nil {
+			if shouldFilterLocationTrackedIP(addr) {
+				panic(addr)
+			}
+		}
 		candidateCopy, copyErr := c.copy()
 		check(copyErr)
 		check(bAgent.AddRemoteCandidate(candidateCopy))
 	}
 
 	candidates, err = bAgent.GetLocalCandidates()
+
 	check(err)
 	for _, c := range candidates {
 		candidateCopy, copyErr := c.copy()
@@ -321,12 +315,10 @@ func randomPort(t testing.TB) int {
 
 func TestConnStats(t *testing.T) {
 	// Check for leaking routines
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	// Limit runtime in case of deadlocks
-	lim := test.TimeOut(time.Second * 20)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 20).Stop()
 
 	ca, cb := pipe(nil)
 	if _, err := ca.Write(make([]byte, 10)); err != nil {

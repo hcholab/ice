@@ -8,7 +8,6 @@ package ice
 
 import (
 	"net"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -18,11 +17,9 @@ import (
 )
 
 func TestMultiUDPMux(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
 	conn1, err := net.ListenUDP(udp, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	require.NoError(t, err)
@@ -111,18 +108,12 @@ func testMultiUDPMuxConnections(t *testing.T, udpMuxMulti *MultiUDPMuxDefault, u
 }
 
 func TestUnspecifiedUDPMux(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
 	muxPort := 7778
-	udpMuxMulti, err := NewMultiUDPMuxFromPort(muxPort, UDPMuxFromPortWithInterfaceFilter(func(s string) bool {
-		defaultDockerBridgeNetwork := strings.Contains(s, "docker")
-		customDockerBridgeNetwork := strings.Contains(s, "br-")
-		return !defaultDockerBridgeNetwork && !customDockerBridgeNetwork
-	}))
+	udpMuxMulti, err := NewMultiUDPMuxFromPort(muxPort, UDPMuxFromPortWithInterfaceFilter(problematicNetworkInterfaces))
 	require.NoError(t, err)
 
 	require.GreaterOrEqual(t, len(udpMuxMulti.muxes), 1, "at least have 1 muxes")

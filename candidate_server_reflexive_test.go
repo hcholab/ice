@@ -15,20 +15,18 @@ import (
 	"github.com/pion/stun/v2"
 	"github.com/pion/transport/v3/test"
 	"github.com/pion/turn/v3"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestServerReflexiveOnlyConnection(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	// Limit runtime in case of deadlocks
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
 	serverPort := randomPort(t)
 	serverListener, err := net.ListenPacket("udp4", "127.0.0.1:"+strconv.Itoa(serverPort))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	server, err := turn.NewServer(turn.ServerConfig{
 		Realm:       "pion.ly",
@@ -40,7 +38,7 @@ func TestServerReflexiveOnlyConnection(t *testing.T) {
 			},
 		},
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	cfg := &AgentConfig{
 		NetworkTypes: []NetworkType{NetworkTypeUDP4},
@@ -55,30 +53,22 @@ func TestServerReflexiveOnlyConnection(t *testing.T) {
 	}
 
 	aAgent, err := NewAgent(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	aNotifier, aConnected := onConnected()
-	if err = aAgent.OnConnectionStateChange(aNotifier); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, aAgent.OnConnectionStateChange(aNotifier))
 
 	bAgent, err := NewAgent(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	bNotifier, bConnected := onConnected()
-	if err = bAgent.OnConnectionStateChange(bNotifier); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, bAgent.OnConnectionStateChange(bNotifier))
 
 	connect(aAgent, bAgent)
 	<-aConnected
 	<-bConnected
 
-	assert.NoError(t, aAgent.Close())
-	assert.NoError(t, bAgent.Close())
-	assert.NoError(t, server.Close())
+	require.NoError(t, aAgent.Close())
+	require.NoError(t, bAgent.Close())
+	require.NoError(t, server.Close())
 }

@@ -8,46 +8,45 @@ package ice
 
 import (
 	"net"
+	"net/netip"
 	"testing"
 	"time"
 
 	"github.com/pion/logging"
 	"github.com/pion/transport/v3/stdnet"
 	"github.com/pion/transport/v3/test"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func getLocalIPAddress(t *testing.T, networkType NetworkType) net.IP {
+func getLocalIPAddress(t *testing.T, networkType NetworkType) netip.Addr {
 	net, err := stdnet.NewNet()
 	require.NoError(t, err)
-	localIPs, err := localInterfaces(net, nil, nil, []NetworkType{networkType}, false)
+	_, localAddrs, err := localInterfaces(net, problematicNetworkInterfaces, nil, []NetworkType{networkType}, false)
 	require.NoError(t, err)
-	require.NotEmpty(t, localIPs)
-	return localIPs[0]
+	require.NotEmpty(t, localAddrs)
+	return localAddrs[0]
 }
 
 func ipv6Available(t *testing.T) bool {
 	net, err := stdnet.NewNet()
 	require.NoError(t, err)
-	localIPs, err := localInterfaces(net, nil, nil, []NetworkType{NetworkTypeTCP6}, false)
+	_, localAddrs, err := localInterfaces(net, problematicNetworkInterfaces, nil, []NetworkType{NetworkTypeTCP6}, false)
 	require.NoError(t, err)
-	return len(localIPs) > 0
+	return len(localAddrs) > 0
 }
 
 func TestActiveTCP(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 5)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 5).Stop()
 
 	const listenPort = 7686
 	type testCase struct {
 		name                    string
 		networkTypes            []NetworkType
-		listenIPAddress         net.IP
+		listenIPAddress         netip.Addr
 		selectedPairNetworkType string
+		useMDNS                 bool
 	}
 
 	testCases := []testCase{
@@ -72,12 +71,16 @@ func TestActiveTCP(t *testing.T) {
 				networkTypes:            []NetworkType{NetworkTypeTCP6},
 				listenIPAddress:         getLocalIPAddress(t, NetworkTypeTCP6),
 				selectedPairNetworkType: tcp,
+				// if we don't use mDNS, we will very liekly be filtering out location tracked ips.
+				useMDNS: true,
 			},
 			testCase{
-				name:                    "UDP is preferred over TCP6", // This fails some time
+				name:                    "UDP is preferred over TCP6",
 				networkTypes:            supportedNetworkTypes(),
 				listenIPAddress:         getLocalIPAddress(t, NetworkTypeTCP6),
 				selectedPairNetworkType: udp,
+				// if we don't use mDNS, we will very liekly be filtering out location tracked ips.
+				useMDNS: true,
 			},
 		)
 	}
@@ -87,8 +90,9 @@ func TestActiveTCP(t *testing.T) {
 			r := require.New(t)
 
 			listener, err := net.ListenTCP("tcp", &net.TCPAddr{
-				IP:   testCase.listenIPAddress,
+				IP:   testCase.listenIPAddress.AsSlice(),
 				Port: listenPort,
+				Zone: testCase.listenIPAddress.Zone(),
 			})
 			r.NoError(err)
 			defer func() {
@@ -110,14 +114,18 @@ func TestActiveTCP(t *testing.T) {
 			r.NotNil(tcpMux.LocalAddr(), "tcpMux.LocalAddr() is nil")
 
 			hostAcceptanceMinWait := 100 * time.Millisecond
-			passiveAgent, err := NewAgent(&AgentConfig{
+			cfg := &AgentConfig{
 				TCPMux:                tcpMux,
 				CandidateTypes:        []CandidateType{CandidateTypeHost},
 				NetworkTypes:          testCase.networkTypes,
 				LoggerFactory:         loggerFactory,
-				IncludeLoopback:       true,
 				HostAcceptanceMinWait: &hostAcceptanceMinWait,
-			})
+				InterfaceFilter:       problematicNetworkInterfaces,
+			}
+			if testCase.useMDNS {
+				cfg.MulticastDNSMode = MulticastDNSModeQueryAndGather
+			}
+			passiveAgent, err := NewAgent(cfg)
 			r.NoError(err)
 			r.NotNil(passiveAgent)
 
@@ -126,6 +134,7 @@ func TestActiveTCP(t *testing.T) {
 				NetworkTypes:          testCase.networkTypes,
 				LoggerFactory:         loggerFactory,
 				HostAcceptanceMinWait: &hostAcceptanceMinWait,
+				InterfaceFilter:       problematicNetworkInterfaces,
 			})
 			r.NoError(err)
 			r.NotNil(activeAgent)
@@ -164,25 +173,20 @@ func TestActiveTCP(t *testing.T) {
 // Assert that Active TCP connectivity isn't established inside
 // the main thread of the Agent
 func TestActiveTCP_NonBlocking(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 5)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 5).Stop()
 
 	cfg := &AgentConfig{
-		NetworkTypes: supportedNetworkTypes(),
+		NetworkTypes:    supportedNetworkTypes(),
+		InterfaceFilter: problematicNetworkInterfaces,
 	}
 
 	aAgent, err := NewAgent(cfg)
-	if err != nil {
-		t.Error(err)
-	}
+	require.NoError(t, err)
 
 	bAgent, err := NewAgent(cfg)
-	if err != nil {
-		t.Error(err)
-	}
+	require.NoError(t, err)
 
 	isConnected := make(chan interface{})
 	err = aAgent.OnConnectionStateChange(func(c ConnectionState) {
@@ -190,21 +194,17 @@ func TestActiveTCP_NonBlocking(t *testing.T) {
 			close(isConnected)
 		}
 	})
-	if err != nil {
-		t.Error(err)
-	}
+	require.NoError(t, err)
 
 	// Add a invalid ice-tcp candidate to each
 	invalidCandidate, err := UnmarshalCandidate("1052353102 1 tcp 1675624447 192.0.2.1 8080 typ host tcptype passive")
-	if err != nil {
-		t.Fatal(err)
-	}
-	assert.NoError(t, aAgent.AddRemoteCandidate(invalidCandidate))
-	assert.NoError(t, bAgent.AddRemoteCandidate(invalidCandidate))
+	require.NoError(t, err)
+	require.NoError(t, aAgent.AddRemoteCandidate(invalidCandidate))
+	require.NoError(t, bAgent.AddRemoteCandidate(invalidCandidate))
 
 	connect(aAgent, bAgent)
 
 	<-isConnected
-	assert.NoError(t, aAgent.Close())
-	assert.NoError(t, bAgent.Close())
+	require.NoError(t, aAgent.Close())
+	require.NoError(t, bAgent.Close())
 }
